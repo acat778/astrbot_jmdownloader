@@ -241,17 +241,34 @@ class JmSource:
         pdf_path: Path,
         limit: int,
     ) -> tuple[int, int]:
-        """下载一章图片，取前 ``limit`` 页合成预览 PDF，返回 (页数, 字节数)。"""
+        """只下载一章的前 ``limit`` 张图片并合成预览 PDF。"""
         photo_id = str(pid)
-        image_dir, images = self._download_photo_images(photo_id, images_root)
-        selected = images[: max(1, int(limit))]
+        images_root.mkdir(parents=True, exist_ok=True)
+        option = self._option(images_root)
+        images: list[Path] = []
         try:
-            page_count = build_chapter_pdf(selected, pdf_path)
+            with jmcomic.new_downloader(option) as downloader:
+                photo = downloader.client.get_photo_detail(photo_id)
+                total = len(getattr(photo, "page_arr", ()) or ())
+                for index in range(min(total, max(1, int(limit)))):
+                    image = photo.create_image_detail(index)
+                    downloader.download_by_image_detail(image)
+                    saved = Path(getattr(image, "save_path", ""))
+                    if saved.is_file():
+                        images.append(saved)
+        except Exception as exc:  # noqa: BLE001 - 统一翻译成章节错误
+            raise _chapter_error(photo_id, exc) from exc
+        if not images:
+            raise ChapterDownloadError(
+                f"章节 {photo_id} 没有可预览的图片", photo_id
+            )
+        try:
+            page_count = build_chapter_pdf(images, pdf_path)
         except PdfBuildError as exc:
             reason = f"章节 {photo_id} 预览 PDF 生成失败（{exc.user_message}）"
             raise ChapterDownloadError(reason, photo_id) from exc
         finally:
-            shutil.rmtree(image_dir, ignore_errors=True)
+            shutil.rmtree(images_root, ignore_errors=True)
         try:
             size_bytes = pdf_path.stat().st_size
         except OSError as exc:

@@ -89,6 +89,55 @@ def test_download_chapter_builds_pdf(monkeypatch, tmp_path):
     assert not (images_root / "123").exists()  # 原始图片已清理
 
 
+def test_preview_pdf_downloads_only_requested_pages(
+    monkeypatch, tmp_path
+):
+    downloaded: list[str] = []
+
+    class FakeImage:
+        def __init__(self, index):
+            self.index = index
+            self.save_path = ""
+
+    class FakePhoto:
+        page_arr = ["a", "b", "c", "d", "e"]
+
+        def create_image_detail(self, index):
+            return FakeImage(index)
+
+    class FakeClient:
+        def get_photo_detail(self, photo_id):
+            return FakePhoto()
+
+    class FakeDownloader:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        client = FakeClient()
+
+        def download_by_image_detail(self, image):
+            path = tmp_path / f"{image.index:05d}.png"
+            Image.new("RGB", (30, 40), color=(1, 2, 3)).save(path)
+            image.save_path = str(path)
+            downloaded.append(str(path))
+
+    def fake_new_downloader(option):
+        return FakeDownloader()
+
+    monkeypatch.setattr(jmcomic, "new_downloader", fake_new_downloader)
+    source = JmSource(PluginConfig())
+    page_count, size = source.preview_pdf(
+        "123", tmp_path / "images", tmp_path / "preview.pdf", 2
+    )
+    assert page_count == 2
+    assert size > 0
+    assert len(downloaded) == 2
+    assert not (tmp_path / "images").exists()
+
+
 def test_download_chapter_maps_exceptions(monkeypatch, tmp_path):
     def fake_download_photo(photo_id, option):
         raise MissingAlbumPhotoException("missing", {})

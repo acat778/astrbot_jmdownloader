@@ -1136,7 +1136,8 @@ def test_run_job_head_selection_merges_pdf(plugin_main, monkeypatch, tmp_path):
     )
     assert "前 2 章" in text
     assert uploads == ["JM999-前2章-测试本.pdf"]
-    assert source.downloaded == ["p1", "p2"]
+    # 多章并发下载的完成顺序不保证，按集合比较
+    assert sorted(source.downloaded) == ["p1", "p2"]
 
 
 def test_run_job_range_out_of_bounds(plugin_main, monkeypatch, tmp_path):
