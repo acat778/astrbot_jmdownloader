@@ -125,6 +125,7 @@ def test_command_releases_semaphore_after_job(plugin_main, monkeypatch):
         chapter_no=None,
         no_cache=False,
         selector=None,
+        file_type="pdf",
     ) -> str:
         assert plugin._semaphore.locked() is True  # noqa: SLF001
         return "完成"
@@ -264,6 +265,21 @@ def test_parse_command_arguments(plugin_main):
     assert parse("123456 --range 5 -1") == CommandRequest(
         "123456", selector=ChapterQuery("range", 5, -1)
     )
+    assert parse("123456 --type zip") == CommandRequest(
+        "123456", file_type="zip"
+    )
+    assert parse("123456 --type=tar.gz --head 2") == CommandRequest(
+        "123456", selector=ChapterQuery("head", 2), file_type="tar.gz"
+    )
+    assert parse("--type 7z 123456 3") == CommandRequest(
+        "123456", chapter_no=3, file_type="7z"
+    )
+    assert parse("123456 --type pdf") == CommandRequest("123456")
+    with pytest.raises(ValueError):
+        parse("123456 --type rar")
+    with pytest.raises(ValueError):
+        parse("123456 --type")
+
     with pytest.raises(ValueError):
         parse("")
     with pytest.raises(ValueError):
@@ -433,27 +449,30 @@ def test_run_command_dispatches_chapter_and_no_cache(plugin_main):
         chapter_no=None,
         no_cache=False,
         selector=None,
+        file_type="pdf",
     ) -> str:
-        calls.append((album_id, chapter_no, no_cache, selector))
+        calls.append(
+            (album_id, chapter_no, no_cache, selector, file_type)
+        )
         return "ok"
 
     plugin._run_job = fake_run_job  # type: ignore[assignment]
     event = FakeEvent()
 
     assert asyncio.run(plugin._run_command(event, PluginConfig(), "123456")) == "ok"
-    assert calls[-1] == ("123456", None, False, None)
+    assert calls[-1] == ("123456", None, False, None, "pdf")
     assert (
         asyncio.run(plugin._run_command(event, PluginConfig(), "123456 3"))
         == "ok"
     )
-    assert calls[-1] == ("123456", 3, False, None)
+    assert calls[-1] == ("123456", 3, False, None, "pdf")
     assert (
         asyncio.run(
             plugin._run_command(event, PluginConfig(), "--no-cache 123456 2")
         )
         == "ok"
     )
-    assert calls[-1] == ("123456", 2, True, None)
+    assert calls[-1] == ("123456", 2, True, None, "pdf")
     assert (
         asyncio.run(
             plugin._run_command(event, PluginConfig(), "123456 --head 2")
@@ -462,6 +481,7 @@ def test_run_command_dispatches_chapter_and_no_cache(plugin_main):
     )
     assert calls[-1][:3] == ("123456", None, False)
     assert calls[-1][3] == ChapterQuery("head", 2)
+    assert calls[-1][4] == "pdf"
 
     message = asyncio.run(
         plugin._run_command(event, PluginConfig(), "123456 --bad")
@@ -529,6 +549,120 @@ def test_run_job_chapter_mode_uploads_single_chapter(
     assert "chapter-2" in text
     assert uploads == ["JM999-章2of3-chapter-2.pdf"]
     assert source.downloaded == ["p2"]  # 只下载选中的一章
+
+
+def test_run_job_archive_zip_upload(plugin_main, monkeypatch, tmp_path):
+    import zipfile
+
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(
+        None, {"encrypt_pdf": False, "cache_albums": 0}
+    )
+    uploads: list[tuple[str, Path]] = []
+
+    async def fake_upload(event, path, file_name, config):
+        uploads.append((file_name, path))
+        return {}
+
+    monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
+    job_root = tmp_path / "archive-job"
+    job_root.mkdir()
+    text = asyncio.run(
+        plugin._run_job(
+            FakeEvent(),
+            "999",
+            PluginConfig.from_mapping(plugin.raw_config),
+            job_root,
+            file_type="zip",
+        )
+    )
+    assert "zip 压缩包已作为 QQ 文件上传" in text
+    assert len(uploads) == 1
+    file_name, archive_path = uploads[0]
+    assert file_name == "JM999-测试本.zip"
+    assert archive_path.suffix == ".zip"
+    with zipfile.ZipFile(archive_path) as archive:
+        names = archive.namelist()
+    assert names == ["001-chapter-1.pdf", "002-chapter-2.pdf", "003-chapter-3.pdf"]
+
+
+def test_run_job_archive_zip_with_password(
+    plugin_main, monkeypatch, tmp_path
+):
+    pyzipper = pytest.importorskip("pyzipper")
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(
+        None,
+        {
+            "encrypt_pdf": True,
+            "pdf_password": "ZipPass123",
+            "cache_albums": 0,
+        },
+    )
+    uploads: list[Path] = []
+
+    async def fake_upload(event, path, file_name, config):
+        uploads.append(path)
+        return {}
+
+    monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
+    job_root = tmp_path / "archive-pass"
+    job_root.mkdir()
+    text = asyncio.run(
+        plugin._run_job(
+            FakeEvent(),
+            "999",
+            PluginConfig.from_mapping(plugin.raw_config),
+            job_root,
+            file_type="zip",
+        )
+    )
+    assert "打开密码：ZipPass123" in text
+    assert len(uploads) == 1
+    with pyzipper.AESZipFile(uploads[0]) as archive:
+        archive.setpassword(b"ZipPass123")
+        assert archive.namelist() == [
+            "001-chapter-1.pdf",
+            "002-chapter-2.pdf",
+            "003-chapter-3.pdf",
+        ]
+
+
+def test_run_job_archive_tar_refuses_password(
+    plugin_main, monkeypatch, tmp_path
+):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(
+        None,
+        {
+            "encrypt_pdf": True,
+            "pdf_password": "TarPass123",
+            "cache_albums": 0,
+        },
+    )
+    uploads: list[str] = []
+
+    async def fake_upload(event, path, file_name, config):
+        uploads.append(file_name)
+        return {}
+
+    monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
+    job_root = tmp_path / "archive-tar-pass"
+    job_root.mkdir()
+    text = asyncio.run(
+        plugin._run_job(
+            FakeEvent(),
+            "999",
+            PluginConfig.from_mapping(plugin.raw_config),
+            job_root,
+            file_type="tar.gz",
+        )
+    )
+    assert "tar" in text and "不支持" in text
+    assert uploads == []
 
 
 def test_run_job_chapter_out_of_range(plugin_main, monkeypatch, tmp_path):

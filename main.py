@@ -35,9 +35,16 @@ except ImportError:  # pragma: no cover - 单测环境/旧版本没有该类型
     GreedyStr = str  # type: ignore[assignment,misc]
 
 from .core.cache import CachedChapter, ChapterCache, resolve_cache_root
+from .core.archive import (
+    OUTPUT_TYPE_HINT,
+    archive_suffix,
+    build_archive,
+    normalize_archive_format,
+)
 from .core.config import DEFAULT_PLUGIN_NAME, PluginConfig
 from .core.delivery import resolve_callback_base, upload_pdf
 from .core.errors import (
+    ArchiveBuildError,
     ChapterOutOfRangeError,
     JmDownloaderError,
     PartialChapterError,
@@ -106,11 +113,16 @@ HELP_TEXT = """JM PDF 下载器命令说明
 /jm <漫画ID> --no-cache
     本次忽略已有章节缓存、强制重新拉取；结束后用新结果刷新缓存。
 
+/jm <漫画ID> --type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz>
+    选择发送格式：pdf（默认）为合并后的单个 PDF；
+    zip/7z/tar 系列把各章 PDF 打包成压缩包发送。
+
 规则：
 1. -- 开头的开关可以放在 /jm 后的任意位置，例如 /jm --no-cache 123456。
 2. 章节号与 --head/--tail/--latest/--range 不能同时使用，筛选开关之间也互斥。
 3. --no-cache 可以和任意章节筛选组合，例如 /jm 123456 --head 3 --no-cache。
-4. PDF 默认使用随机密码加密，上传完成后单独发送密码；固定密码在插件配置中填写。"""
+4. --type 可以放在任意位置，例如 /jm 123456 --head 3 --type zip。
+5. PDF/压缩包默认使用随机密码加密，上传完成后单独发送密码；固定密码在插件配置中填写。"""
 
 GROUP_BLOCK_MESSAGES = {
     "disabled": "当前配置下 /jm 只在私聊生效。",
@@ -129,7 +141,8 @@ def group_block_message(event: AstrMessageEvent, config: PluginConfig) -> str | 
 
 USAGE_HINT = (
     "用法：/jm <数字ID> [章节号] "
-    "[--head [N] | --tail [N] | --latest [N] | --range <起始章> [章数] | --no-cache]；"
+    "[--head/--tail/--latest/--range ... | --no-cache | "
+    "--type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz>]；"
     "发送 /jm help 查看完整说明"
 )
 
@@ -264,6 +277,7 @@ def parse_command_arguments(raw: str) -> CommandRequest:
     positionals: list[str] = []
     selector: ChapterQuery | None = None
     no_cache = False
+    file_type = "pdf"
     cursor = 0
     while cursor < len(words):
         word = words[cursor]
@@ -275,10 +289,27 @@ def parse_command_arguments(raw: str) -> CommandRequest:
         if flag in _NO_CACHE_TOKENS:
             no_cache = True
             continue
+        if flag == "--type" or flag.startswith("--type="):
+            if "=" in word:
+                value = word.split("=", 1)[1]
+            elif cursor < len(words):
+                value = words[cursor]
+                cursor += 1
+            else:
+                raise ValueError("--type 需要一个文件格式值")
+            try:
+                file_type = (
+                    "pdf"
+                    if value.strip().lower() == "pdf"
+                    else normalize_archive_format(value)
+                )
+            except ArchiveBuildError as exc:
+                raise ValueError(exc.user_message) from exc
+            continue
         if flag not in _SELECTOR_TOKENS:
             raise ValueError(
                 f"未知参数 {word}；可用开关："
-                "--head/--tail/--latest/--range/--no-cache"
+                "--head/--tail/--latest/--range/--no-cache/--type"
             )
         if selector is not None:
             raise ValueError("--head/--tail/--latest/--range 只能使用一个")
@@ -292,7 +323,13 @@ def parse_command_arguments(raw: str) -> CommandRequest:
     )
     if chapter_no is not None and selector is not None:
         raise ValueError("章节号与 --head/--tail/--latest/--range 不能同时使用")
-    return CommandRequest(positionals[0], chapter_no, selector, no_cache)
+    return CommandRequest(
+        positionals[0],
+        chapter_no,
+        selector,
+        no_cache,
+        file_type,
+    )
 
 
 def select_chapter(album: AlbumInfo, chapter_no: int) -> ChapterRef:
@@ -463,8 +500,9 @@ class JmDownloaderPlugin(Star):
 
     @filter.command(
         "jm",
-        desc="下载 JM 本子并发送 PDF：/jm <数字ID> "
-        "[章节号|--head/--tail/--latest/--range] [--no-cache]",
+        desc="下载 JM 本子并发送 PDF/压缩包：/jm <数字ID> "
+        "[章节号|--head/--tail/--latest/--range] "
+        "[--no-cache] [--type pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz]",
     )
     async def download_command(
         self,
@@ -538,6 +576,7 @@ class JmDownloaderPlugin(Star):
                     request.chapter_no,
                     request.no_cache,
                     request.selector,
+                    request.file_type,
                 )
             finally:
                 rmtree(job_root, ignore_errors=True)
@@ -585,6 +624,7 @@ class JmDownloaderPlugin(Star):
         chapter_no: int | None = None,
         no_cache: bool = False,
         selector: ChapterQuery | None = None,
+        file_type: str = "pdf",
     ) -> str:
         """执行一次完整任务：读相册 → 收集章节 → 分模式投递。"""
         try:
@@ -639,6 +679,8 @@ class JmDownloaderPlugin(Star):
                 selector=selector,
                 label=scope.label,
             )
+            if file_type != "pdf":
+                return await self._deliver_archive(context, file_type)
             if scope.chapters is not None:
                 return await self._run_selected_mode(context)
             return await self._deliver_whole(context)
@@ -1285,6 +1327,94 @@ class JmDownloaderPlugin(Star):
         if cause is None:  # pragma: no cover - 循环至少执行一次
             raise RuntimeError("上传未执行")
         raise cause
+
+    # ---- 压缩包投递 ---------------------------------------------------
+
+    @staticmethod
+    def _archive_file_name(context: "_JobContext", fmt: str) -> str:
+        """压缩包上传文件名：沿用 PDF 基名，替换为压缩后缀。"""
+        if len(context.chapters) == 1:
+            chapter = context.chapters[0]
+            position = chapter_position(context.album, chapter.pid)
+            pdf_name = chapter_pdf_name(
+                context.album.album_id,
+                context.album.title,
+                position,
+                context.album.chapter_count,
+                chapter.title,
+            )
+        elif context.selector is not None:
+            pdf_name = selection_pdf_name(
+                context.album.album_id,
+                context.album.title,
+                context.selector,
+                len(context.chapters),
+                context.album.chapter_count,
+            )
+        else:
+            pdf_name = album_pdf_name(
+                context.album.album_id, context.album.title
+            )
+        return pdf_name[: -len(".pdf")] + archive_suffix(fmt)
+
+    async def _build_archive(
+        self, context: "_JobContext", fmt: str
+    ) -> Path:
+        """把章节 PDF 打包为压缩包；zip/7z 在包级别加密。"""
+        archive_password = context.password if fmt in {"zip", "7z"} else ""
+        if context.password and not archive_password:
+            raise ArchiveBuildError(
+                "tar 系列压缩包不支持设置密码；请改用 --type zip/7z，"
+                "或关闭 PDF 加密后再使用 tar 系列。"
+            )
+        members: list[tuple[Path, str]] = []
+        for order, chapter in enumerate(context.chapters, start=1):
+            title = _filename_fragment(chapter.title, 40)
+            title = title.replace("/", "_").replace("\\", "_").strip() or "chapter"
+            members.append((chapter.path, f"{order:03d}-{title}.pdf"))
+        output = context.job_root / f"bundle{archive_suffix(fmt)}"
+        return await to_thread(
+            build_archive, members, output, fmt, archive_password
+        )
+
+    async def _deliver_archive(
+        self, context: "_JobContext", fmt: str
+    ) -> str:
+        """生成压缩包并上传；压缩包模式不进入 PDF 分卷回退。"""
+        label = context.label or "整本"
+        try:
+            archive_path = await self._build_archive(context, fmt)
+        except JmDownloaderError as exc:
+            return f"{context.album_ref} 压缩包生成失败：{exc.user_message}"
+        size = archive_path.stat().st_size
+        file_name = self._archive_file_name(context, fmt)
+        try:
+            await self._upload_with_retries(
+                context.event, archive_path, file_name, context.config
+            )
+        except UploadConfigError as exc:
+            return (
+                f"{context.album_ref} {label} {fmt} 压缩包已生成"
+                f"（{format_mib(size)}{context.encrypt_note}），"
+                f"但无法上传：{exc.user_message}"
+            )
+        except Exception as exc:  # noqa: BLE001 - 压缩包上传失败直接回显原因
+            self.logger.warning(
+                "%s 压缩包上传失败", context.album_ref, exc_info=True
+            )
+            return (
+                f"{context.album_ref} {label} {fmt} 压缩包已生成"
+                f"（{format_mib(size)}{context.encrypt_note}），"
+                f"但上传失败；原因：{self._short_error(exc)}；"
+                "详因见 AstrBot 日志。"
+            )
+        self.logger.info(
+            "压缩包上传成功：%s（%s）", file_name, format_mib(size)
+        )
+        return context.report(
+            f"{context.album_ref} {label} {fmt} 压缩包已作为 QQ 文件上传"
+            f"（{format_mib(size)}{context.encrypt_note}）。"
+        )
 
     # ---- 工具 ---------------------------------------------------------
 

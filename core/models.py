@@ -47,6 +47,7 @@ class CommandRequest:
     chapter_no: int | None = None
     selector: ChapterQuery | None = None
     no_cache: bool = False
+    file_type: str = "pdf"
 
 
 @dataclass(frozen=True)

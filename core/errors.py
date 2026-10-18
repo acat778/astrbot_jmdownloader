@@ -58,6 +58,10 @@ class SplitNotPossibleError(JmDownloaderError):
     """无法按章节边界生成回退分卷。"""
 
 
+class ArchiveBuildError(JmDownloaderError):
+    """压缩包生成失败（格式不支持、缺少依赖或打包异常）。"""
+
+
 class UploadConfigError(JmDownloaderError):
     """上传前置条件不满足（如 base64 兜底超过体积上限）。"""
 

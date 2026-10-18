@@ -43,6 +43,8 @@ SOFTWARE.
 | [AstrBot](https://github.com/AstrBotDevs/AstrBot) | AGPL-3.0-or-later | https://github.com/AstrBotDevs/AstrBot | 插件宿主应用。本插件仅通过 AstrBot 公开插件 API 运行，不修改或内嵌 AstrBot 源码；AstrBot 本身的再分发/修改需遵守其 AGPL-3.0-or-later 条款。 |
 | [jmcomic](https://github.com/hect0x7/JMComic-Crawler-Python) | MIT License（Copyright (c) 2023 hect0x7） | https://github.com/hect0x7/JMComic-Crawler-Python | 用于访问相册元数据、下载并解码章节图片。 |
 | [img2pdf](https://gitlab.mister-muffin.de/josch/img2pdf) | LGPL-3.0 | https://gitlab.mister-muffin.de/josch/img2pdf | 调用其公开 API 将章节图片合成为 PDF；未修改其源码。 |
+| [py7zr](https://github.com/miurahr/py7zr) | LGPL-2.1-or-later | https://github.com/miurahr/py7zr | 生成 7z 压缩包。 |
+| [pyzipper](https://github.com/danifus/pyzipper) | MIT License | https://github.com/danifus/pyzipper | 生成带 AES 密码的 zip 压缩包。 |
 | [pypdf](https://github.com/py-pdf/pypdf) | BSD-3-Clause | https://github.com/py-pdf/pypdf | 用于 PDF 合并、页数统计与密码加密。 |
 
 > 依赖的实际许可证文本随对应 Python 包一起分发（见各包 `dist-info/LICENSE*`）。若将本插件与依赖打包成单一发行物再分发，需要同时满足对应依赖的许可条款（例如 LGPL-3.0 的源码/替换要求、BSD-3-Clause 的版权与免责声明保留要求、AGPL-3.0 针对 AstrBot 的要求）。

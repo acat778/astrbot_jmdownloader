@@ -1,3 +1,5 @@
 jmcomic>=2.7.0,<3
 img2pdf>=0.5.1
 pypdf[crypto]>=5.0
+py7zr>=0.20
+pyzipper>=0.3
