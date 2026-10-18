@@ -151,8 +151,8 @@ HELP_TEXT = """JM PDF 下载器命令说明
     N 省略或写 0 时使用配置 preview_pages（默认 10）。
 
 /jm <漫画ID> --info
-    只查询本子详情页信息（标题、作者、标签、页数/章节、日期、简介等），
-    优先渲染成图片发送，失败回退文字；不下载。
+    查询本子详情（标题、作者、标签、页数/章节、日期、简介等），
+    同时下载并发送封面；详情优先渲染成图片，失败回退文字；不下载章节。
 
 /jm <漫画ID> --sub <loop 间隔|cron 表达式>
     订阅本子更新：按 loop（如 30m/6h/1d）或 cron（5 段表达式）检查；
@@ -958,6 +958,22 @@ class JmDownloaderPlugin(Star):
             album = await to_thread(source.fetch_album, album_id)
         except JmDownloaderError as exc:
             return f"JM{album_id} {exc.user_message}"
+        cover_dir = Path(mkdtemp(prefix="jm-info-", dir=str(JOB_TEMP_ROOT)))
+        try:
+            cover = await to_thread(
+                source.fetch_album_cover,
+                album.album_id,
+                cover_dir / "cover.jpg",
+            )
+            if cover is not None:
+                try:
+                    await event.send(
+                        MessageChain().file_image(str(cover))
+                    )
+                except Exception:  # noqa: BLE001 - 封面失败不影响详情
+                    self.logger.warning("封面发送失败", exc_info=True)
+        finally:
+            rmtree(cover_dir, ignore_errors=True)
         lines = [f"JM{album.album_id}「{album.title}」"]
         if album.authors:
             lines.append("作者：" + "、".join(album.authors))

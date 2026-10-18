@@ -184,6 +184,27 @@ class JmSource:
             description=str(getattr(album, "description", "") or "").strip(),
         )
 
+    def fetch_album_cover(self, album_id: str, save_path: Path) -> Path | None:
+        """下载本子封面到 ``save_path``；失败返回 None（不影响详情展示）。"""
+        album_ref = str(album_id)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        workspace = Path(tempfile.mkdtemp(prefix="jm_cover_"))
+        try:
+            option = self._option(workspace)
+            try:
+                with jmcomic.new_downloader(option) as downloader:
+                    downloader.client.download_album_cover(
+                        album_ref, str(save_path), ""
+                    )
+            except Exception:  # noqa: BLE001 - 封面失败不阻断详情
+                logger.warning(
+                    "下载 JM%s 封面失败", album_ref, exc_info=True
+                )
+                return None
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+        return save_path if save_path.is_file() and save_path.stat().st_size else None
+
     # -- 单章下载 + PDF 合成 ---------------------------------------------
 
     def _download_photo_images(

@@ -235,6 +235,23 @@ def test_info_command_returns_detail_text_fallback(
     assert "详情页" in text
 
 
+def test_info_command_sends_cover_image(plugin_main, monkeypatch, tmp_path):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(None, {})
+
+    async def fake_render(event, text):
+        return None
+
+    monkeypatch.setattr(plugin, "_render_text_image", fake_render)
+    event = FakeEvent()
+    text = asyncio.run(plugin._run_command(event, PluginConfig(), "999 --info"))
+    cover_chains = [chain for chain in event.chains if chain.images]
+    assert len(cover_chains) == 1
+    assert cover_chains[0].images[0][0] == "file"
+    assert "测试本" in text
+
+
 def test_info_command_sends_image_when_render_available(
     plugin_main, monkeypatch
 ):
@@ -249,8 +266,9 @@ def test_info_command_sends_image_when_render_available(
     monkeypatch.setattr(plugin, "_render_text_image", fake_render)
     reply = asyncio.run(plugin._run_command(event, PluginConfig(), "999 --info"))
     assert reply == ""
-    assert len(event.chains) == 1
-    assert event.chains[0].images == [("url", "https://example.invalid/info.jpg")]
+    assert len(event.chains) == 2
+    assert event.chains[0].images[0][0] == "file"  # 封面
+    assert event.chains[1].images == [("url", "https://example.invalid/info.jpg")]
 
 
 def test_run_job_and_fallback_are_coroutines(plugin_main):
@@ -655,6 +673,13 @@ class _FakeSource:
 
     def fetch_album(self, album_id: str) -> AlbumInfo:
         return self.album
+
+    def fetch_album_cover(self, album_id, save_path):
+        from PIL import Image
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (30, 40), color=(9, 8, 7)).save(save_path)
+        return save_path
 
     def preview_pdf(self, pid, images_root, pdf_path, limit):
         from PIL import Image
