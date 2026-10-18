@@ -8,11 +8,11 @@ desc: |
 
   PDF 默认带有随机打开密码，上传完成后单独发送密码；可以在配置中改为固定密码或关闭加密。已下载的章节 PDF 会缓存，重复处理同一本子时只补缺失章节。
 
-  配置项按卡片分组（基本设置 / 分卷回退 / 上传设置 / 章节缓存 / 下载与网络）。
+  配置项按卡片分组（基本设置 / 群聊名单 / 分卷回退 / 上传设置 / 章节缓存 / 下载与网络）。
 
   运行要求：AstrBot 4.27.1 及以上（低于 5.0）与 OneBot v11(aiocqhttp) 适配器；协议端需连接 AstrBot 的反向 WebSocket（默认 ws://<AstrBot主机>:6199/ws）。AstrBot 与协议端不在同一容器时，需要配置协议端可访问的 AstrBot 地址；未配置时使用 base64 方式发送（单文件上限 256 MiB）。
 help: /jm help 查看全部命令。常用写法：/jm 123456（整本）、/jm 123456 3（第 3 章）、/jm 123456 --head 3、/jm 123456 --range 5 2、/jm 123456 --latest 5、/jm 123456 --no-cache。PDF 打开密码会在上传结束后单独发送。
-version: 1.0.1
+version: 1.1.0
 author: ACAT
 repo: https://github.com/acat-fun/astrbot_jmdownloader
 astrbot_version: ">=4.27.1,<5"

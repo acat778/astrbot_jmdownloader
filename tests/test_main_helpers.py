@@ -137,6 +137,55 @@ def test_command_releases_semaphore_after_job(plugin_main, monkeypatch):
     assert event.messages == ["完成"]
 
 
+def test_group_whitelist_blocks_unlisted_group(plugin_main):
+    import asyncio
+
+    plugin = plugin_main.JmDownloaderPlugin(
+        None, {"groups": {"group_whitelist": "111"}}
+    )
+    event = FakeEvent()
+    event.group_id = "222"
+    asyncio.run(plugin.download_command(event, "123456"))
+    assert len(event.messages) == 1
+    assert "白名单" in event.messages[0]
+
+
+def test_group_blacklist_blocks_group(plugin_main):
+    import asyncio
+
+    plugin = plugin_main.JmDownloaderPlugin(
+        None, {"groups": {"group_blacklist": "222"}}
+    )
+    event = FakeEvent()
+    event.group_id = "222"
+    asyncio.run(plugin.download_command(event, "help"))
+    assert len(event.messages) == 1
+    assert "黑名单" in event.messages[0]
+
+
+def test_group_lists_empty_allow_group(plugin_main):
+    import asyncio
+
+    plugin = plugin_main.JmDownloaderPlugin(None, {})
+    event = FakeEvent()
+    event.group_id = "333"
+    asyncio.run(plugin.download_command(event, "abc"))
+    assert len(event.messages) == 1
+    assert "用法" in event.messages[0]
+
+
+def test_group_lists_do_not_apply_to_private_chat(plugin_main):
+    import asyncio
+
+    plugin = plugin_main.JmDownloaderPlugin(
+        None, {"groups": {"group_blacklist": "333"}}
+    )
+    event = FakeEvent()
+    asyncio.run(plugin.download_command(event, "abc"))
+    assert len(event.messages) == 1
+    assert "用法" in event.messages[0]
+
+
 def test_run_job_and_fallback_are_coroutines(plugin_main):
     plugin = plugin_main.JmDownloaderPlugin(None, {})
     assert inspect.iscoroutinefunction(plugin._run_job)  # noqa: SLF001

@@ -7,6 +7,7 @@ from astrbot_jmdownloader.core.config import (
     flatten_config,
     normalize_proxy,
     parse_cookies,
+    parse_group_ids,
 )
 
 
@@ -62,6 +63,38 @@ def test_parse_cookies():
     assert parse_cookies("a=1; b=2") == {"a": "1", "b": "2"}
     assert parse_cookies(" broken ; c = 3 ") == {"c": "3"}
     assert parse_cookies("") == {}
+
+
+def test_parse_group_ids():
+    assert parse_group_ids("123, 456 789\n1011，1213；1415") == frozenset(
+        {123, 456, 789, 1011, 1213, 1415}
+    )
+    assert parse_group_ids("") == frozenset()
+    assert parse_group_ids("abc, 123x, 456") == frozenset({456})
+
+
+def test_group_access():
+    restricted = PluginConfig.from_mapping(
+        {
+            "groups": {
+                "group_whitelist": "100, 200",
+                "group_blacklist": "200",
+            }
+        }
+    )
+    assert restricted.group_access("100") == "ok"
+    assert restricted.group_access(200) == "blacklist"
+    assert restricted.group_access("300") == "whitelist"
+
+    blacklist_only = PluginConfig.from_mapping(
+        {"groups": {"group_blacklist": "999"}}
+    )
+    assert blacklist_only.group_access("123") == "ok"
+    assert blacklist_only.group_access("999") == "blacklist"
+
+    assert PluginConfig().group_access("123") == "ok"
+    disabled = PluginConfig.from_mapping({"basic": {"allow_group": False}})
+    assert disabled.group_access("123") == "disabled"
 
 
 def test_normalize_proxy():

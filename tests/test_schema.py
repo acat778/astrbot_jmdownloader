@@ -14,7 +14,14 @@ def _schema() -> dict:
 
 def test_top_level_groups_are_object_cards():
     schema = _schema()
-    assert list(schema) == ["basic", "split", "upload", "cache", "network"]
+    assert list(schema) == [
+        "basic",
+        "groups",
+        "split",
+        "upload",
+        "cache",
+        "network",
+    ]
     for group in schema.values():
         assert group["type"] == "object"
         assert group["description"]
@@ -45,6 +52,8 @@ def test_removed_legacy_flat_keys():
     assert flat_keys == {
         "enabled",
         "allow_group",
+        "group_whitelist",
+        "group_blacklist",
         "encrypt_pdf",
         "pdf_password",
         "split_auto",

@@ -28,6 +28,22 @@
       }
     }
   },
+  "groups": {
+    "type": "object",
+    "description": "群聊名单",
+    "items": {
+      "group_whitelist": {
+        "type": "string",
+        "default": "",
+        "description": "群聊白名单：填写群号，多个用逗号/空格/换行分隔；留空表示所有群都可用，非空时仅名单内群可用"
+      },
+      "group_blacklist": {
+        "type": "string",
+        "default": "",
+        "description": "群聊黑名单：填写群号，多个用逗号/空格/换行分隔；留空表示不拉黑；黑名单优先于白名单"
+      }
+    }
+  },
   "split": {
     "type": "object",
     "description": "分卷回退",

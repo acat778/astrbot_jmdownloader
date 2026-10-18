@@ -7,6 +7,7 @@ AstrBot 下发的配置对象是可变 dict，这里每次命令开始时生成�
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -66,6 +67,16 @@ def parse_cookies(raw: Any) -> dict[str, str]:
     return jar
 
 
+def parse_group_ids(raw: Any) -> frozenset[int]:
+    """解析群号名单：支持逗号、中文逗号、分号、空格与换行分隔。"""
+    numbers: set[int] = set()
+    for token in re.split(r"[,，;；\s]+", str(raw or "")):
+        token = token.strip()
+        if token.isdigit():
+            numbers.add(int(token))
+    return frozenset(numbers)
+
+
 def normalize_proxy(raw: Any) -> str:
     """给缺协议头的代理地址补上 ``http://``。"""
     address = str(raw or "").strip()
@@ -82,6 +93,8 @@ class PluginConfig:
 
     enabled: bool = True
     allow_group: bool = True
+    group_whitelist: frozenset[int] = frozenset()
+    group_blacklist: frozenset[int] = frozenset()
     encrypt_pdf: bool = True
     pdf_password: str = ""
     callback_api_base: str = ""
@@ -104,6 +117,8 @@ class PluginConfig:
         return cls(
             enabled=_as_bool(source.get("enabled"), True),
             allow_group=_as_bool(source.get("allow_group"), True),
+            group_whitelist=parse_group_ids(source.get("group_whitelist")),
+            group_blacklist=parse_group_ids(source.get("group_blacklist")),
             encrypt_pdf=_as_bool(source.get("encrypt_pdf"), True),
             pdf_password=str(source.get("pdf_password") or "").strip(),
             callback_api_base=str(source.get("callback_api_base") or "").strip(),
@@ -122,6 +137,20 @@ class PluginConfig:
             photo_threads=_as_int(source.get("photo_threads"), 4, 1, 16),
             max_concurrent=_as_int(source.get("max_concurrent"), 1, 1, 3),
         )
+
+    def group_access(self, group_id: str | int | None) -> str:
+        """判断群聊访问级别：ok / disabled / blacklist / whitelist。"""
+        if not self.allow_group:
+            return "disabled"
+        try:
+            gid = int(str(group_id).strip())
+        except (TypeError, ValueError):
+            return "ok"
+        if gid in self.group_blacklist:
+            return "blacklist"
+        if self.group_whitelist and gid not in self.group_whitelist:
+            return "whitelist"
+        return "ok"
 
     @property
     def split_enabled(self) -> bool:

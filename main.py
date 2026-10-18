@@ -112,6 +112,21 @@ HELP_TEXT = """JM PDF 下载器命令说明
 3. --no-cache 可以和任意章节筛选组合，例如 /jm 123456 --head 3 --no-cache。
 4. PDF 默认使用随机密码加密，上传完成后单独发送密码；固定密码在插件配置中填写。"""
 
+GROUP_BLOCK_MESSAGES = {
+    "disabled": "当前配置下 /jm 只在私聊生效。",
+    "blacklist": "当前群聊已被加入黑名单，不能使用 /jm。",
+    "whitelist": "当前群聊不在白名单内，不能使用 /jm。",
+}
+
+
+def group_block_message(event: AstrMessageEvent, config: PluginConfig) -> str | None:
+    """群聊被禁用/拉黑/未进白名单时返回提示文案。"""
+    group_id = str(event.get_group_id() or "").strip()
+    if not group_id:
+        return None
+    return GROUP_BLOCK_MESSAGES.get(config.group_access(group_id))
+
+
 USAGE_HINT = (
     "用法：/jm <数字ID> [章节号] "
     "[--head [N] | --tail [N] | --latest [N] | --range <起始章> [章数] | --no-cache]；"
@@ -465,6 +480,10 @@ class JmDownloaderPlugin(Star):
         if not config.enabled:
             await self._say(event, "该 JM 下载插件目前处于关闭状态。")
             return
+        blocked = group_block_message(event, config)
+        if blocked:
+            await self._say(event, blocked)
+            return
         if is_help_request(raw_args):
             await self._send_help(event)
             return
@@ -485,6 +504,9 @@ class JmDownloaderPlugin(Star):
         """校验参数与权限，占用并发信号量后执行一次任务并返回结果文案。"""
         if not config.enabled:
             return "该 JM 下载插件目前处于关闭状态。"
+        blocked = group_block_message(event, config)
+        if blocked:
+            return blocked
         if is_help_request(raw_args):
             return HELP_TEXT
         try:
