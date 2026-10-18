@@ -162,10 +162,26 @@ class JmSource:
         )
         if len(chapters) == 0:
             raise AlbumNotFoundError(f"JM{album_ref} 没有可下载的章节。")
+        def _text_tuple(value: object) -> tuple[str, ...]:
+            if not isinstance(value, (list, tuple)):
+                return ()
+            return tuple(str(item).strip() for item in value if str(item).strip())
+
         return AlbumInfo(
             album_id=str(album.id),
             title=str(album.name or "").strip(),
             chapters=chapters,
+            page_count=int(getattr(album, "page_count", 0) or 0),
+            publish_date=str(getattr(album, "pub_date", "") or ""),
+            update_date=str(getattr(album, "update_date", "") or ""),
+            likes=str(getattr(album, "likes", "") or ""),
+            views=str(getattr(album, "views", "") or ""),
+            comment_count=int(getattr(album, "comment_count", 0) or 0),
+            authors=_text_tuple(getattr(album, "authors", ())),
+            tags=_text_tuple(getattr(album, "tags", ())),
+            works=_text_tuple(getattr(album, "works", ())),
+            actors=_text_tuple(getattr(album, "actors", ())),
+            description=str(getattr(album, "description", "") or "").strip(),
         )
 
     # -- 单章下载 + PDF 合成 ---------------------------------------------

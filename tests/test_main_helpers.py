@@ -223,6 +223,36 @@ def test_subscription_command_saves_subscription(
     assert plugin._sub_store_cache.load() == []  # noqa: SLF001
 
 
+def test_info_command_returns_detail_text_fallback(
+    plugin_main, monkeypatch
+):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(None, {})
+    text = asyncio.run(plugin._run_command(FakeEvent(), PluginConfig(), "999 --info"))
+    assert "JM999" in text and "测试本" in text
+    assert "章节 3" in text
+    assert "详情页" in text
+
+
+def test_info_command_sends_image_when_render_available(
+    plugin_main, monkeypatch
+):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(None, {})
+    event = FakeEvent()
+
+    async def fake_render(event, text):
+        return "https://example.invalid/info.jpg"
+
+    monkeypatch.setattr(plugin, "_render_text_image", fake_render)
+    reply = asyncio.run(plugin._run_command(event, PluginConfig(), "999 --info"))
+    assert reply == ""
+    assert len(event.chains) == 1
+    assert event.chains[0].images == [("url", "https://example.invalid/info.jpg")]
+
+
 def test_run_job_and_fallback_are_coroutines(plugin_main):
     plugin = plugin_main.JmDownloaderPlugin(None, {})
     assert inspect.iscoroutinefunction(plugin._run_job)  # noqa: SLF001
@@ -352,6 +382,9 @@ def test_parse_command_arguments(plugin_main):
     assert parse("123456 --type pdf") == CommandRequest(
         "123456", file_type="pdf"
     )
+    assert parse("123456 --info").info is True
+    assert parse("--info 123456").info is True
+    assert parse("123456 --info --type zip").info is True
     with pytest.raises(ValueError):
         parse("123456 --type rar")
     with pytest.raises(ValueError):

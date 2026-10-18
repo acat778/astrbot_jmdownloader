@@ -113,6 +113,7 @@ PDF_PASSWORD_LENGTH: int = 8
 STALE_JOB_SECONDS = 6 * 60 * 60
 
 _NO_CACHE_TOKENS = frozenset({"--no-cache", "--nocache", "--no_cache", "nocache"})
+_INFO_TOKENS = frozenset({"--info", "-i"})
 _SELECTOR_TOKENS = frozenset({"--head", "--tail", "--latest", "--range"})
 _HELP_TOKENS = frozenset({"help", "-h", "--help", "?", "？"})
 
@@ -149,6 +150,10 @@ HELP_TEXT = """JM PDF 下载器命令说明
     按 --type 或配置 default_file_type 生成 PDF/压缩包发送，密码按配置；
     N 省略或写 0 时使用配置 preview_pages（默认 10）。
 
+/jm <漫画ID> --info
+    只查询本子详情页信息（标题、作者、标签、页数/章节、日期、简介等），
+    优先渲染成图片发送，失败回退文字；不下载。
+
 /jm <漫画ID> --sub <loop 间隔|cron 表达式>
     订阅本子更新：按 loop（如 30m/6h/1d）或 cron（5 段表达式）检查；
     可配 --type 指定推送格式，--push file|notice 选择推送文件或仅通知；
@@ -182,7 +187,7 @@ USAGE_HINT = (
     "用法：/jm <数字ID> [章节号] "
     "[--head/--tail/--latest/--range ... | --no-cache | "
     "--type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz> | --pre [N] | "
-    "--sub <loop 间隔|cron 表达式> | --sub off]；"
+    "--sub <loop 间隔|cron 表达式> | --sub off | --info]；"
     "发送 /jm help 查看完整说明"
 )
 
@@ -423,6 +428,7 @@ def parse_command_arguments(raw: str) -> CommandRequest:
     file_type: str | None = None
     preview: int | None = None
     sub_state: dict = {"seen": False}
+    info = False
     cursor = 0
     while cursor < len(words):
         word = words[cursor]
@@ -431,6 +437,9 @@ def parse_command_arguments(raw: str) -> CommandRequest:
             positionals.append(word)
             continue
         flag = word.lower()
+        if flag in _INFO_TOKENS:
+            info = True
+            continue
         handled = _parse_subscription_flags(word, words, cursor, sub_state)
         if handled is not None:
             cursor = handled
@@ -511,6 +520,7 @@ def parse_command_arguments(raw: str) -> CommandRequest:
         file_type,
         preview,
         subscription,
+        info,
     )
 
 
@@ -845,6 +855,8 @@ class JmDownloaderPlugin(Star):
         if not album_id:
             return USAGE_HINT
         file_type = request.file_type or config.default_file_type
+        if request.info:
+            return await self._handle_info(event, config, album_id)
         if request.subscription is not None:
             async with self._semaphore:
                 return await self._handle_subscription(
@@ -896,19 +908,94 @@ class JmDownloaderPlugin(Star):
                 self.logger.warning("帮助图片未能发出，改为文字版", exc_info=True)
         await self._say(event, HELP_TEXT)
 
-    async def _render_help_image(
-        self, event: AstrMessageEvent
+    async def _render_text_image(
+        self, event: AstrMessageEvent, text: str
     ) -> str | None:
         """调用 AstrBot 的文本转图服务，失败返回 None。"""
         try:
             umo = getattr(event, "unified_msg_origin", None)
             rendered = await self.text_to_image(
-                HELP_TEXT, return_url=True, umo=umo
+                text, return_url=True, umo=umo
             )
         except Exception:  # noqa: BLE001 - t2i 不可用/未配置
-            self.logger.warning("帮助内容转图失败，改用文字版", exc_info=True)
+            self.logger.warning("文本转图失败，改用文字版", exc_info=True)
             return None
         return rendered or None
+
+    async def _send_rendered_text(
+        self, event: AstrMessageEvent, text: str
+    ) -> bool:
+        """把文本渲染成图片发送；失败返回 False，由调用方回退文字。"""
+        image = await self._render_text_image(event, text)
+        if not image:
+            return False
+        chain = MessageChain()
+        if image.startswith("http"):
+            chain.url_image(image)
+        else:
+            chain.file_image(image)
+        try:
+            await event.send(chain)
+        except Exception:  # noqa: BLE001 - 图片发送失败回退文字
+            self.logger.warning("图片消息发送失败，改用文字版", exc_info=True)
+            return False
+        return True
+
+    async def _render_help_image(
+        self, event: AstrMessageEvent
+    ) -> str | None:
+        """调用 AstrBot 的文本转图服务渲染帮助，失败返回 None。"""
+        return await self._render_text_image(event, HELP_TEXT)
+
+    # ---- 详情 ---------------------------------------------------------
+
+    async def _handle_info(
+        self, event: AstrMessageEvent, config: PluginConfig, album_id: str
+    ) -> str:
+        """查询并返回本子详情页信息（不下载）。"""
+        source = JmSource(config)
+        try:
+            album = await to_thread(source.fetch_album, album_id)
+        except JmDownloaderError as exc:
+            return f"JM{album_id} {exc.user_message}"
+        lines = [f"JM{album.album_id}「{album.title}」"]
+        if album.authors:
+            lines.append("作者：" + "、".join(album.authors))
+        if album.works:
+            lines.append("作品：" + "、".join(album.works))
+        if album.actors:
+            lines.append("角色：" + "、".join(album.actors))
+        if album.tags:
+            lines.append("标签：" + "、".join(album.tags))
+        stats = [f"章节 {album.chapter_count}"]
+        if album.page_count:
+            stats.append(f"页数 {album.page_count}")
+        if album.comment_count:
+            stats.append(f"评论 {album.comment_count}")
+        lines.append(" · ".join(stats))
+        dates = []
+        if album.publish_date:
+            dates.append(f"发布 {album.publish_date}")
+        if album.update_date:
+            dates.append(f"更新 {album.update_date}")
+        if dates:
+            lines.append(" · ".join(dates))
+        if album.likes or album.views:
+            lines.append(
+                "喜欢 {likes} · 观看 {views}".format(
+                    likes=album.likes or "-", views=album.views or "-"
+                )
+            )
+        if album.description:
+            description = " ".join(album.description.split())
+            if len(description) > 200:
+                description = description[:200] + "…"
+            lines.append("简介：" + description)
+        lines.append(f"详情页：https://18comic.vip/album/{album.album_id}")
+        text = "\n".join(lines)
+        if await self._send_rendered_text(event, text):
+            return ""
+        return text
 
     # ---- 订阅 ---------------------------------------------------------
 

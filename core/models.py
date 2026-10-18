@@ -67,15 +67,28 @@ class CommandRequest:
     """预览页数：None=非预览；0=使用配置默认值；正整数=指定页数。"""
     subscription: SubscriptionRequest | None = None
     """非 None 表示创建/更新订阅。"""
+    info: bool = False
+    """是否只查询并发送本子详情。"""
 
 
 @dataclass(frozen=True)
 class AlbumInfo:
-    """一次 /jm 任务的相册元数据。"""
+    """一次 /jm 任务的相册元数据（核心字段 + 详情页展示字段）。"""
 
     album_id: str
     title: str
     chapters: tuple[ChapterRef, ...]
+    page_count: int = 0
+    publish_date: str = ""
+    update_date: str = ""
+    likes: str = ""
+    views: str = ""
+    comment_count: int = 0
+    authors: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    works: tuple[str, ...] = ()
+    actors: tuple[str, ...] = ()
+    description: str = ""
 
     @property
     def chapter_count(self) -> int:
