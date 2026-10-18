@@ -87,6 +87,7 @@ def test_command_handler_is_coroutine(plugin_main):
 class FakeEvent:
     def __init__(self) -> None:
         self.group_id = ""
+        self.unified_msg_origin = "aiocqhttp:GroupMessage:999"
         self.stopped = False
         self.messages: list[str] = []
         self.chains: list = []
@@ -187,6 +188,39 @@ def test_group_lists_do_not_apply_to_private_chat(plugin_main):
     asyncio.run(plugin.download_command(event, "abc"))
     assert len(event.messages) == 1
     assert "用法" in event.messages[0]
+
+
+def test_subscription_command_saves_subscription(
+    plugin_main, monkeypatch, tmp_path
+):
+    from astrbot_jmdownloader.core.subscriptions import SubscriptionStore
+
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(None, {})
+    plugin._sub_store_cache = SubscriptionStore(tmp_path)  # noqa: SLF001
+    event = FakeEvent()
+    text = asyncio.run(
+        plugin._run_command(
+            event,
+            PluginConfig(),
+            "123456 --sub loop 6h --type zip --push notice "
+            "--notice group realtime",
+        )
+    )
+    assert "已订阅" in text
+    saved = plugin._sub_store_cache.load()  # noqa: SLF001
+    assert len(saved) == 1
+    assert saved[0].album_id == "999"
+    assert saved[0].schedule_kind == "loop"
+    assert saved[0].schedule_value == "21600s"
+    assert saved[0].file_type == "zip"
+    assert saved[0].push_mode == "notice"
+    assert saved[0].targets == ["aiocqhttp:GroupMessage:999"]
+    # 取消订阅
+    text = asyncio.run(plugin._run_command(event, PluginConfig(), "999 --sub off"))
+    assert "已取消" in text
+    assert plugin._sub_store_cache.load() == []  # noqa: SLF001
 
 
 def test_run_job_and_fallback_are_coroutines(plugin_main):
@@ -337,6 +371,34 @@ def test_parse_command_arguments(plugin_main):
         parse("123456 --pre 99")
     with pytest.raises(ValueError):
         parse("123456 --pre=abc")
+    sub = parse(
+        "123456 --sub cron 0 9 * * * --type zip --push file "
+        "--notice group 111,222 realtime"
+    )
+    assert sub.subscription is not None
+    assert sub.subscription.schedule_kind == "cron"
+    assert sub.subscription.schedule_value == "0 9 * * *"
+    assert sub.subscription.file_type == "zip"
+    assert sub.subscription.push_mode == "file"
+    assert sub.subscription.notice_type == "group"
+    assert sub.subscription.notice_sids == "111,222"
+    assert sub.subscription.notice_timing == "realtime"
+    assert sub.file_type is None
+
+    loop_sub = parse("123456 --sub loop 30m")
+    assert loop_sub.subscription is not None
+    assert loop_sub.subscription.schedule_kind == "loop"
+    assert loop_sub.subscription.schedule_value == "30m"
+
+    notice_cron = parse(
+        "123456 --sub loop 1h --notice user 333 cron 0 9 * * *"
+    )
+    assert notice_cron.subscription is not None
+    assert notice_cron.subscription.notice_timing == "cron"
+    assert notice_cron.subscription.notice_cron == "0 9 * * *"
+
+    assert parse("123456 --sub off").subscription is not None
+
 
 
     with pytest.raises(ValueError):

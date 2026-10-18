@@ -54,6 +54,57 @@
       }
     }
   },
+  "subscriptions": {
+    "type": "object",
+    "description": "订阅设置",
+    "items": {
+      "sub_default_schedule_kind": {
+        "type": "string",
+        "default": "loop",
+        "description": "默认订阅方式：loop（固定间隔）或 cron（定时表达式）"
+      },
+      "sub_default_schedule_value": {
+        "type": "string",
+        "default": "6h",
+        "description": "默认订阅间隔/表达式：loop 填 30m/6h/1d，cron 填 5 段表达式"
+      },
+      "sub_default_type": {
+        "type": "string",
+        "default": "pdf",
+        "description": "订阅推送的默认文件格式：pdf/zip/7z/tar/tar.gz/tar.bz2/tar.xz"
+      },
+      "sub_default_push_mode": {
+        "type": "string",
+        "default": "file",
+        "description": "订阅更新后的默认推送内容：file（直接推送预览文件）或 notice（只发消息通知）"
+      },
+      "sub_default_notice_type": {
+        "type": "string",
+        "default": "group",
+        "description": "默认通知目标类型：group（群聊）或 user（私聊）"
+      },
+      "sub_default_notice_sids": {
+        "type": "string",
+        "default": "",
+        "description": "默认通知目标会话 ID：多个用逗号分隔；留空表示订阅发起时的当前会话"
+      },
+      "sub_default_notice_timing": {
+        "type": "string",
+        "default": "realtime",
+        "description": "默认通知时机：realtime（检测到更新立即推送）或 cron（按定时表达式汇总推送）"
+      },
+      "sub_default_notice_cron": {
+        "type": "string",
+        "default": "0 9 * * *",
+        "description": "通知时机为 cron 时使用的 5 段定时表达式"
+      },
+      "sub_check_interval": {
+        "type": "int",
+        "default": 60,
+        "description": "订阅检查间隔秒数（30-600）"
+      }
+    }
+  },
   "split": {
     "type": "object",
     "description": "分卷回退",

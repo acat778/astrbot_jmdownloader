@@ -8,6 +8,7 @@ AstrBot 插件：在聊天中发送 `/jm <ID>`，抓取 JM 章节图片，合成
 
 - **两种内容范围**：整本、指定单章，或按 `--head/--tail/--latest/--range` 选取若干章合并发送。
 - **两种发送格式**：默认合并为 PDF；`--type zip|7z|tar|tar.gz|tar.bz2|tar.xz` 时把各章 PDF 打包成压缩包发送。未写 `--type` 时使用配置 `default_file_type`。
+- **订阅更新**：`--sub loop <间隔>`/`--sub cron <表达式>` 定时检查本子更新，按配置直接推送文件或消息通知，支持群聊/私聊多目标；订阅可在插件 WebUI「订阅管理」页维护。
 - **预览模式**：`--pre [N]` 取所选范围（整本/单章/一条范围）第一章的前 N 页，按 `--type` 或配置 `default_file_type` 发送 PDF/压缩包，密码按配置；N 省略或写 0 时使用配置 `preview_pages`（默认 10），可与 `--type`、章节筛选任意顺序混用。
 - **整本优先、失败分卷**：先尝试单文件上传；只有整本上传失败才进入分卷回退，分卷切点只落在章节之间。
 - **按实测体积规划分卷**：卷数、单卷目标与每卷章节数由整本 PDF 大小、各章 PDF 大小、投递方式（URL / base64）共同决定，不需要手填固定值。
@@ -95,6 +96,37 @@ AstrBot 插件：在聊天中发送 `/jm <ID>`，抓取 JM 章节图片，合成
 - 章节号越界会提示相册的有效范围。
 - `--range` 的章数省略时默认 1；`-1` 表示从起始章到最新。
 
+## 订阅更新
+
+订阅一个本子后，插件会按周期检查章节变化，发现新章节后按设置推送。
+
+### 命令方式
+
+```text
+/jm 123456 --sub loop 6h --type pdf --push file --notice group realtime
+/jm 123456 --sub cron 0 9 * * * --type zip --push notice --notice user 111,222 cron 0 20 * * *
+/jm 123456 --sub off
+```
+
+- `--sub loop <间隔>`：固定间隔检查，支持 `30m/6h/1d`（最小 60 秒，最大 30 天）
+- `--sub cron <5 段表达式>`：按 cron 检查（分 时 日 月 周）
+- `--type <格式>`：发现更新后推送的文件格式（默认取配置 `default_file_type`）
+- `--push file|notice`：推送更新文件（并附通知）或只发消息通知
+- `--notice <group|user> [会话ID,...] <realtime|cron> [cron表达式]`：
+  - 不写会话 ID 时使用当前会话；多个会话 ID 用逗号分隔
+  - `realtime`：检测到更新后立即推送
+  - `cron`：在指定 cron 时间汇总推送，后面需跟 5 段表达式
+- 未写的字段使用「订阅设置」配置或订阅管理页的默认值
+- `/jm <漫画ID> --sub off` 取消该本子的订阅
+
+### 管理页
+
+AstrBot 插件详情页提供「订阅管理」视图（`views/subscriptions/`）：
+- 查看/删除已有订阅
+- 新建/编辑订阅（本子 ID、订阅方式、格式、推送方式、通知目标）
+- 设置订阅默认值
+- 查看当前基础配置摘要（其余配置项仍由 AstrBot「插件配置」页管理）
+
 ## 跨容器上传配置
 
 AstrBot 与协议端在同一容器时可直接使用文件路径；分容器部署时协议端看不到 AstrBot 容器内的文件，需要通过 URL 或 base64 传递：
@@ -141,6 +173,15 @@ AstrBot 与协议端在同一容器时可直接使用文件路径；分容器部
 | 上传设置 | `callback_api_base` | 协议端可访问的 AstrBot 地址 |
 | 上传设置 | `upload_retries` | 上传失败重试次数（0-5） |
 | 章节缓存 | `cache_albums` | 缓存保留的本子数（0-50） |
+| 订阅设置 | `sub_default_schedule_kind` | 默认订阅方式：loop / cron |
+| 订阅设置 | `sub_default_schedule_value` | 默认间隔或 cron 表达式 |
+| 订阅设置 | `sub_default_type` | 默认推送格式 |
+| 订阅设置 | `sub_default_push_mode` | 默认推送内容：file / notice |
+| 订阅设置 | `sub_default_notice_type` | 默认通知目标：group / user |
+| 订阅设置 | `sub_default_notice_sids` | 默认通知会话 ID（逗号分隔，留空=当前会话） |
+| 订阅设置 | `sub_default_notice_timing` | 默认通知时机：realtime / cron |
+| 订阅设置 | `sub_default_notice_cron` | cron 时机的 5 段表达式 |
+| 订阅设置 | `sub_check_interval` | 订阅检查间隔秒数（30-600） |
 | 群聊名单 | `group_whitelist` | 群聊白名单：群号用逗号/空格/换行分隔；留空表示不限制 |
 | 群聊名单 | `group_blacklist` | 群聊黑名单：群号用逗号/空格/换行分隔；留空表示不拉黑，黑名单优先 |
 | 下载与网络 | `cookies` | 站点登录 Cookie（可选，`k=v; k2=v2`） |

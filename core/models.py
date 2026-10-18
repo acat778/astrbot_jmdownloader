@@ -40,6 +40,20 @@ class ChapterQuery:
 
 
 @dataclass(frozen=True)
+class SubscriptionRequest:
+    """``--sub`` 订阅参数（未填的字段由配置/页面默认值补齐）。"""
+
+    schedule_kind: str | None = None
+    schedule_value: str = ""
+    file_type: str | None = None
+    push_mode: str | None = None
+    notice_type: str | None = None
+    notice_sids: str = ""
+    notice_timing: str | None = None
+    notice_cron: str = ""
+
+
+@dataclass(frozen=True)
 class CommandRequest:
     """``/jm`` 命令解析结果。"""
 
@@ -50,7 +64,9 @@ class CommandRequest:
     file_type: str | None = None
     """显式 --type；None 表示使用配置默认格式。"""
     preview: int | None = None
-    """预览张数：None=非预览；0=使用配置默认值；正整数=指定张数。"""
+    """预览页数：None=非预览；0=使用配置默认值；正整数=指定页数。"""
+    subscription: SubscriptionRequest | None = None
+    """非 None 表示创建/更新订阅。"""
 
 
 @dataclass(frozen=True)

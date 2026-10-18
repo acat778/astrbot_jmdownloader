@@ -16,9 +16,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from asyncio import Lock, Semaphore, gather, sleep, to_thread
+from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import datetime
+from types import SimpleNamespace
 from pathlib import Path
 from secrets import choice
 from shutil import rmtree
@@ -41,7 +45,11 @@ from .core.archive import (
     build_archive,
     normalize_archive_format,
 )
-from .core.config import DEFAULT_PLUGIN_NAME, PluginConfig
+from .core.config import (
+    DEFAULT_PLUGIN_NAME,
+    PluginConfig,
+    parse_default_file_type,
+)
 from .core.delivery import resolve_callback_base, upload_pdf
 from .core.errors import (
     ArchiveBuildError,
@@ -60,6 +68,7 @@ from .core.models import (
     ChapterRef,
     CommandRequest,
     DeliveryMode,
+    SubscriptionRequest,
     JobStats,
     MIB,
     SplitPlan,
@@ -67,6 +76,23 @@ from .core.models import (
 )
 from .core.pdf import encrypt_pdf, merge_pdfs
 from .core.planner import SplitInput, plan_split
+from .core.subscriptions import (
+    DEFAULT_NOTICE_CRON,
+    DEFAULT_NOTICE_TIMING,
+    DEFAULT_NOTICE_TYPE,
+    DEFAULT_PUSH_MODE,
+    DEFAULT_SCHEDULE_KIND,
+    DEFAULT_SCHEDULE_VALUE,
+    Subscription,
+    SubscriptionError,
+    SubscriptionStore,
+    build_target,
+    next_run,
+    now_text,
+    parse_loop_interval,
+    resolve_subscription_root,
+    validate_cron,
+)
 
 # 每次任务的临时目录统一放在系统临时目录下，启动时顺手清理超时残留。
 JOB_TEMP_ROOT = Path(gettempdir()) / "astrbot_jmdownloader"
@@ -123,6 +149,12 @@ HELP_TEXT = """JM PDF 下载器命令说明
     按 --type 或配置 default_file_type 生成 PDF/压缩包发送，密码按配置；
     N 省略或写 0 时使用配置 preview_pages（默认 10）。
 
+/jm <漫画ID> --sub <loop 间隔|cron 表达式>
+    订阅本子更新：按 loop（如 30m/6h/1d）或 cron（5 段表达式）检查；
+    可配 --type 指定推送格式，--push file|notice 选择推送文件或仅通知；
+    --notice <group|user> [会话ID,...] <realtime|cron> [cron表达式] 指定目标与时机。
+    /jm <漫画ID> --sub off 取消订阅。订阅也可在插件 WebUI「订阅管理」页维护。
+
 规则：
 1. -- 开头的开关可以放在 /jm 后的任意位置，例如 /jm --no-cache 123456。
 2. 章节号与 --head/--tail/--latest/--range 不能同时使用，筛选开关之间也互斥。
@@ -149,7 +181,8 @@ def group_block_message(event: AstrMessageEvent, config: PluginConfig) -> str | 
 USAGE_HINT = (
     "用法：/jm <数字ID> [章节号] "
     "[--head/--tail/--latest/--range ... | --no-cache | "
-    "--type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz> | --pre [N]]；"
+    "--type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz> | --pre [N] | "
+    "--sub <loop 间隔|cron 表达式> | --sub off]；"
     "发送 /jm help 查看完整说明"
 )
 
@@ -297,6 +330,86 @@ def _parse_selector(
     return ChapterQuery("range", start, count), cursor
 
 
+def _take_cron_expression(
+    words: list[str], cursor: int, label: str
+) -> tuple[str, int]:
+    """从 token 流中取 5 段 cron（兼容整段带引号的写法）。"""
+    tokens = words[cursor : cursor + 5]
+    if len(tokens) < 5 or any(token.startswith("--") for token in tokens):
+        raise ValueError(f"{label} 需要 5 段 cron 表达式（分 时 日 月 周）")
+    expression = " ".join(tokens).strip().strip("\"'")
+    try:
+        return validate_cron(expression), cursor + 5
+    except SubscriptionError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _parse_subscription_flags(
+    word: str, words: list[str], cursor: int, state: dict
+) -> int | None:
+    """处理 --sub / --notice / --push；返回新的游标（None 表示未处理）。"""
+    flag = word.lower()
+    if flag == "--sub":
+        state["seen"] = True
+        if cursor < len(words) and words[cursor].lower() == "off":
+            state["schedule_kind"] = "off"
+            return cursor + 1
+        if cursor < len(words) and words[cursor].lower() in {"cron", "loop"}:
+            state["schedule_kind"] = words[cursor].lower()
+            cursor += 1
+            if state["schedule_kind"] == "cron":
+                expression, cursor = _take_cron_expression(
+                    words, cursor, "--sub cron"
+                )
+                state["schedule_value"] = expression
+            elif cursor < len(words) and not words[cursor].startswith("--"):
+                value = words[cursor]
+                cursor += 1
+                try:
+                    parse_loop_interval(value)
+                except SubscriptionError as exc:
+                    raise ValueError(str(exc)) from exc
+                state["schedule_value"] = value
+        return cursor
+    if flag == "--push":
+        state["seen"] = True
+        if cursor >= len(words):
+            raise ValueError("--push 需要 file 或 notice")
+        mode = words[cursor].strip().lower()
+        if mode not in {"file", "notice"}:
+            raise ValueError("--push 只能是 file 或 notice")
+        state["push_mode"] = mode
+        return cursor + 1
+    if flag == "--notice":
+        state["seen"] = True
+        if cursor >= len(words) or words[cursor].startswith("--"):
+            return cursor
+        notice_type = words[cursor].strip().lower()
+        if notice_type in {"group", "user"}:
+            state["notice_type"] = notice_type
+            cursor += 1
+            if (
+                cursor < len(words)
+                and not words[cursor].startswith("--")
+                and words[cursor].lower() not in {"realtime", "cron"}
+            ):
+                state["notice_sids"] = words[cursor]
+                cursor += 1
+        timing = (
+            words[cursor].strip().lower() if cursor < len(words) else ""
+        )
+        if timing in {"realtime", "cron"}:
+            state["notice_timing"] = timing
+            cursor += 1
+            if timing == "cron":
+                expression, cursor = _take_cron_expression(
+                    words, cursor, "--notice cron"
+                )
+                state["notice_cron"] = expression
+        return cursor
+    return None
+
+
 def parse_command_arguments(raw: str) -> CommandRequest:
     """解析 ``/jm`` 后的全部参数。
 
@@ -309,6 +422,7 @@ def parse_command_arguments(raw: str) -> CommandRequest:
     no_cache = False
     file_type: str | None = None
     preview: int | None = None
+    sub_state: dict = {"seen": False}
     cursor = 0
     while cursor < len(words):
         word = words[cursor]
@@ -317,6 +431,10 @@ def parse_command_arguments(raw: str) -> CommandRequest:
             positionals.append(word)
             continue
         flag = word.lower()
+        handled = _parse_subscription_flags(word, words, cursor, sub_state)
+        if handled is not None:
+            cursor = handled
+            continue
         if flag in _NO_CACHE_TOKENS:
             no_cache = True
             continue
@@ -372,6 +490,19 @@ def parse_command_arguments(raw: str) -> CommandRequest:
     )
     if chapter_no is not None and selector is not None:
         raise ValueError("章节号与 --head/--tail/--latest/--range 不能同时使用")
+    subscription = None
+    if sub_state["seen"]:
+        subscription = SubscriptionRequest(
+            schedule_kind=sub_state.get("schedule_kind"),
+            schedule_value=sub_state.get("schedule_value", ""),
+            file_type=file_type,
+            push_mode=sub_state.get("push_mode"),
+            notice_type=sub_state.get("notice_type"),
+            notice_sids=sub_state.get("notice_sids", ""),
+            notice_timing=sub_state.get("notice_timing"),
+            notice_cron=sub_state.get("notice_cron", ""),
+        )
+        file_type = None
     return CommandRequest(
         positionals[0],
         chapter_no,
@@ -379,6 +510,7 @@ def parse_command_arguments(raw: str) -> CommandRequest:
         no_cache,
         file_type,
         preview,
+        subscription,
     )
 
 
@@ -527,6 +659,24 @@ class _JobContext:
         return "\n".join(lines)
 
 
+class _PushUploadEvent:
+    """把订阅推送目标包装成 delivery.upload_pdf 需要的事件形状。"""
+
+    def __init__(self, umo: str, is_group: bool, session_id: str, bot: object):
+        self.unified_msg_origin = umo
+        self._is_group = is_group
+        self._session_id = session_id
+        self.bot = SimpleNamespace(
+            api=SimpleNamespace(call_action=bot.call_action)
+        )
+
+    def get_group_id(self) -> str:
+        return self._session_id if self._is_group else ""
+
+    def get_sender_id(self) -> str:
+        return self._session_id
+
+
 class JmDownloaderPlugin(Star):
     """使用 ``/jm <ID>`` 下载 JM 漫画并以 PDF 形式发送。
 
@@ -543,8 +693,98 @@ class JmDownloaderPlugin(Star):
         snapshot = PluginConfig.from_mapping(self.raw_config)
         self._semaphore = Semaphore(snapshot.max_concurrent)
         self._cache_lock = Lock()
+        self._sub_task: asyncio.Task | None = None
+        self._sub_store_cache: SubscriptionStore | None = None
         JOB_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
         self._cleanup_stale_jobs()
+
+    # ---- 生命周期 -----------------------------------------------------
+
+    async def initialize(self) -> None:
+        """插件激活：注册 Web API 并启动订阅轮询任务。"""
+        self._register_web_apis()
+        self._ensure_subscription_loop()
+
+    async def terminate(self) -> None:
+        """插件停用/重载：取消订阅轮询任务。"""
+        task = self._sub_task
+        self._sub_task = None
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    def _register_web_apis(self) -> None:
+        """注册订阅管理页使用的后端 API。"""
+        register = getattr(self.context, "register_web_api", None)
+        if not callable(register):
+            return
+        base = f"/{DEFAULT_PLUGIN_NAME}"
+        register(f"{base}/subscriptions", self.web_subscriptions, ["GET"], "订阅列表")
+        register(
+            f"{base}/subscriptions/save",
+            self.web_subscription_save,
+            ["POST"],
+            "保存订阅",
+        )
+        register(
+            f"{base}/subscriptions/delete",
+            self.web_subscription_delete,
+            ["POST"],
+            "删除订阅",
+        )
+        register(
+            f"{base}/settings/save",
+            self.web_settings_save,
+            ["POST"],
+            "保存订阅默认值",
+        )
+
+    def _subscription_store(self) -> SubscriptionStore | None:
+        if self._sub_store_cache is None:
+            root = resolve_subscription_root(DEFAULT_PLUGIN_NAME)
+            if root is None:
+                return None
+            self._sub_store_cache = SubscriptionStore(root)
+        return self._sub_store_cache
+
+    def _ensure_subscription_loop(self) -> None:
+        if self._sub_task is None or self._sub_task.done():
+            self._sub_task = asyncio.create_task(self._subscription_loop())
+
+    async def _subscription_loop(self) -> None:
+        """后台轮询订阅；异常只记录，不终止循环。"""
+        while True:
+            config = PluginConfig.from_mapping(self.raw_config)
+            try:
+                await self._check_subscriptions(config)
+            except Exception:  # noqa: BLE001 - 后台任务不能因单次失败退出
+                self.logger.exception("订阅轮询失败")
+            await asyncio.sleep(config.sub_check_interval)
+
+    def _subscription_defaults(self, config: PluginConfig) -> dict:
+        """页面默认值优先于插件配置，最后回落到内置默认值。"""
+        store = self._subscription_store()
+        page_defaults = store.load_defaults() if store is not None else {}
+        merged = {
+            "schedule_kind": config.sub_default_schedule_kind
+            or DEFAULT_SCHEDULE_KIND,
+            "schedule_value": config.sub_default_schedule_value
+            or DEFAULT_SCHEDULE_VALUE,
+            "file_type": config.sub_default_type or "pdf",
+            "push_mode": config.sub_default_push_mode or DEFAULT_PUSH_MODE,
+            "notice_type": config.sub_default_notice_type
+            or DEFAULT_NOTICE_TYPE,
+            "notice_sids": config.sub_default_notice_sids,
+            "notice_timing": config.sub_default_notice_timing
+            or DEFAULT_NOTICE_TIMING,
+            "notice_cron": config.sub_default_notice_cron
+            or DEFAULT_NOTICE_CRON,
+        }
+        for key, value in page_defaults.items():
+            if value not in (None, ""):
+                merged[key] = value
+        return merged
 
     # ---- 命令入口 -----------------------------------------------------
 
@@ -605,6 +845,11 @@ class JmDownloaderPlugin(Star):
         if not album_id:
             return USAGE_HINT
         file_type = request.file_type or config.default_file_type
+        if request.subscription is not None:
+            async with self._semaphore:
+                return await self._handle_subscription(
+                    event, config, request
+                )
         if event.get_group_id() and not config.allow_group:
             return "当前配置下 /jm 只在私聊生效。"
 
@@ -664,6 +909,456 @@ class JmDownloaderPlugin(Star):
             self.logger.warning("帮助内容转图失败，改用文字版", exc_info=True)
             return None
         return rendered or None
+
+    # ---- 订阅 ---------------------------------------------------------
+
+    async def _handle_subscription(
+        self,
+        event: AstrMessageEvent,
+        config: PluginConfig,
+        request: CommandRequest,
+    ) -> str:
+        """创建/更新/取消一个漫画订阅。"""
+        store = self._subscription_store()
+        if store is None:
+            return "无法访问插件数据目录，订阅功能不可用。"
+        sub_request = request.subscription
+        assert sub_request is not None
+        album_id = normalize_album_id(request.album_id)
+        if not album_id:
+            return USAGE_HINT
+        if sub_request.schedule_kind == "off":
+            removed = store.delete(album_id)
+            return (
+                f"已取消 JM{album_id} 的订阅。"
+                if removed
+                else f"JM{album_id} 当前没有订阅。"
+            )
+        defaults = self._subscription_defaults(config)
+        kind = sub_request.schedule_kind or defaults["schedule_kind"]
+        value = sub_request.schedule_value or defaults["schedule_value"]
+        if kind == "loop":
+            try:
+                value = f"{parse_loop_interval(value)}s"
+            except SubscriptionError as exc:
+                return f"订阅参数错误：{exc}"
+        elif kind == "cron":
+            try:
+                value = validate_cron(value)
+            except SubscriptionError as exc:
+                return f"订阅参数错误：{exc}"
+        else:
+            return "订阅方式只支持 loop 或 cron。"
+        file_type = sub_request.file_type or defaults["file_type"]
+        file_type = parse_default_file_type(file_type)
+        push_mode = sub_request.push_mode or defaults["push_mode"]
+        if push_mode not in {"file", "notice"}:
+            return "推送内容只能是 file 或 notice。"
+        notice_type = sub_request.notice_type or defaults["notice_type"]
+        sids = sub_request.notice_sids or defaults["notice_sids"]
+        targets = build_target(event, notice_type, sids)
+        if not targets:
+            return "订阅需要一个通知目标（群聊/私聊会话）。"
+        timing = sub_request.notice_timing or defaults["notice_timing"]
+        if timing not in {"realtime", "cron"}:
+            return "通知时机只能是 realtime 或 cron。"
+        notice_cron = sub_request.notice_cron or defaults["notice_cron"]
+        try:
+            validate_cron(notice_cron)
+        except SubscriptionError as exc:
+            return f"订阅参数错误：{exc}"
+        source = JmSource(config)
+        try:
+            album = await to_thread(source.fetch_album, album_id)
+        except JmDownloaderError as exc:
+            return f"JM{album_id} {exc.user_message}"
+        now = datetime.now()
+        next_run_at = next_run(kind, value, now)
+        next_notice_at = (
+            next_run("cron", notice_cron, now) if timing == "cron" else ""
+        )
+        subscription = Subscription(
+            album_id=album.album_id,
+            album_title=album.title,
+            schedule_kind=kind,
+            schedule_value=value,
+            file_type=file_type,
+            push_mode=push_mode,
+            notice_type=notice_type,
+            targets=targets,
+            notice_timing=timing,
+            notice_cron=notice_cron,
+            seen_pids=[chapter.pid for chapter in album.chapters],
+            next_run_at=next_run_at.isoformat(timespec="seconds"),
+            next_notice_at=(
+                next_notice_at.isoformat(timespec="seconds")
+                if next_notice_at
+                else ""
+            ),
+            created_at=now_text(),
+        )
+        store.upsert(subscription)
+        return (
+            f"已订阅 JM{album.album_id}「{album.title}」："
+            f"{kind} {value}，推送格式 {file_type}，"
+            f"{'文件+通知' if push_mode == 'file' else '仅消息通知'}，"
+            f"通知 {notice_type}（{len(targets)} 个会话），"
+            f"更新检测后{'立即' if timing == 'realtime' else '按 ' + notice_cron}"
+            f"推送；下次检查 {next_run_at.strftime('%Y-%m-%d %H:%M')}。"
+        )
+
+    async def _check_subscriptions(self, config: PluginConfig) -> None:
+        """检查所有到期的订阅，发现新章节后按配置推送。"""
+        store = self._subscription_store()
+        if store is None:
+            return
+        subscriptions = store.load()
+        if not subscriptions:
+            return
+        now = datetime.now()
+        changed = False
+        for subscription in subscriptions:
+            if not subscription.enabled:
+                continue
+            due_run = subscription.next_run
+            if due_run is not None and now < due_run:
+                continue
+            try:
+                source = JmSource(config)
+                album = await to_thread(source.fetch_album, subscription.album_id)
+                current = [chapter.pid for chapter in album.chapters]
+                seen = set(subscription.seen_pids)
+                fresh = [pid for pid in current if pid not in seen]
+                subscription.album_title = album.title or subscription.album_title
+                subscription.seen_pids = current
+                subscription.last_check_at = now_text()
+                subscription.next_run_at = next_run(
+                    subscription.schedule_kind,
+                    subscription.schedule_value,
+                    now,
+                ).isoformat(timespec="seconds")
+                if subscription.notice_timing == "cron":
+                    if fresh:
+                        subscription.pending_pids = list(
+                            dict.fromkeys(subscription.pending_pids + fresh)
+                        )
+                        if not subscription.next_notice_at:
+                            subscription.next_notice_at = next_run(
+                                "cron", subscription.notice_cron, now
+                            ).isoformat(timespec="seconds")
+                elif fresh:
+                    await self._push_subscription(
+                        subscription, album, fresh, config
+                    )
+                due_notice = subscription.next_notice
+                if (
+                    subscription.pending_pids
+                    and subscription.notice_timing == "cron"
+                    and (due_notice is None or now >= due_notice)
+                ):
+                    await self._push_subscription(
+                        subscription,
+                        album,
+                        subscription.pending_pids,
+                        config,
+                    )
+                    subscription.pending_pids = []
+                    subscription.next_notice_at = next_run(
+                        "cron", subscription.notice_cron, now
+                    ).isoformat(timespec="seconds")
+                changed = True
+            except JmDownloaderError as exc:
+                self.logger.warning(
+                    "订阅 %s 检查失败：%s", subscription.album_id, exc
+                )
+                subscription.next_run_at = next_run(
+                    subscription.schedule_kind,
+                    subscription.schedule_value,
+                    now,
+                ).isoformat(timespec="seconds")
+                changed = True
+            except Exception:  # noqa: BLE001 - 单个订阅失败不影响其它
+                self.logger.exception(
+                    "订阅 %s 检查异常", subscription.album_id
+                )
+                changed = True
+        if changed:
+            store.save(subscriptions)
+
+    async def _push_subscription(
+        self,
+        subscription: Subscription,
+        album: AlbumInfo,
+        pids: list[str],
+        config: PluginConfig,
+    ) -> None:
+        """向订阅目标推送更新文件或消息通知。"""
+        by_pid = {chapter.pid: chapter for chapter in album.chapters}
+        refs = tuple(by_pid[pid] for pid in pids if pid in by_pid)
+        if not refs:
+            return
+        title = subscription.album_title or album.title
+        summary = (
+            f"JM{album.album_id}「{title}」有 {len(refs)} 章更新："
+            + "、".join(pid for pid in pids[:5])
+            + (" 等" if len(refs) > 5 else "")
+        )
+        if subscription.push_mode == "notice":
+            for target in subscription.targets:
+                await self._push_text(target, summary)
+            return
+        path: Path | None = None
+        try:
+            path, file_name, password = await self._build_subscription_file(
+                subscription, album, refs, config
+            )
+            for target in subscription.targets:
+                await self._push_file(target, path, file_name, config)
+                text = summary + "，已推送文件"
+                if password:
+                    text += f"，打开密码：{password}"
+                await self._push_text(target, text)
+        except Exception as exc:  # noqa: BLE001 - 失败时退化为通知
+            self.logger.warning(
+                "订阅 %s 文件推送失败", subscription.album_id, exc_info=True
+            )
+            for target in subscription.targets:
+                await self._push_text(
+                    target, summary + f"（文件推送失败：{self._short_error(exc)}）"
+                )
+        finally:
+            if path is not None:
+                rmtree(path.parent, ignore_errors=True)
+
+    async def _build_subscription_file(
+        self,
+        subscription: Subscription,
+        album: AlbumInfo,
+        refs: tuple[ChapterRef, ...],
+        config: PluginConfig,
+    ) -> tuple[Path, str, str]:
+        """下载更新章节并合成订阅推送文件，返回 (路径, 文件名, 密码)。"""
+        source = JmSource(config)
+        cache = self._open_cache(config)
+        job_root = Path(
+            mkdtemp(prefix=f"jm{album.album_id}-subscription-", dir=str(JOB_TEMP_ROOT))
+        )
+        try:
+            chapters, _stats = await self._collect_chapters(
+                source,
+                album,
+                config,
+                job_root,
+                cache,
+                refs,
+                ignore_cache=False,
+            )
+            if not chapters:
+                raise JmDownloaderError("订阅更新章节下载失败")
+            password = resolve_pdf_password(config)
+            if subscription.file_type == "pdf":
+                path = await self._build_pdf(
+                    chapters, job_root / "subscription.pdf", password
+                )
+                name = f"JM{album.album_id}-更新-{len(chapters)}章.pdf"
+            else:
+                fmt = subscription.file_type
+                archive_password = password if fmt in {"zip", "7z"} else ""
+                if password and not archive_password:
+                    raise JmDownloaderError(
+                        "tar 系列压缩包不支持密码，请改用 zip/7z 或关闭加密"
+                    )
+                members = [
+                    (
+                        chapter.path,
+                        f"{order:03d}-{_filename_fragment(chapter.title, 40) or 'chapter'}.pdf",
+                    )
+                    for order, chapter in enumerate(chapters, start=1)
+                ]
+                path = job_root / f"subscription{archive_suffix(fmt)}"
+                await to_thread(
+                    build_archive, members, path, fmt, archive_password
+                )
+                name = (
+                    f"JM{album.album_id}-更新-{len(chapters)}章"
+                    f"{archive_suffix(fmt)}"
+                )
+            # 把最终文件移到 job_root 外一层，避免调用方清理时丢失
+            final = Path(
+                mkdtemp(prefix="jm-sub-push-", dir=str(JOB_TEMP_ROOT))
+            ) / name
+            path.replace(final)
+            return final, name, password
+        finally:
+            rmtree(job_root, ignore_errors=True)
+
+    async def _push_text(self, target: str, text: str) -> None:
+        """向指定会话主动发送文字消息。"""
+        try:
+            await self.context.send_message(target, MessageChain().message(text))
+        except Exception:  # noqa: BLE001 - 推送失败只记日志
+            self.logger.warning("订阅消息推送失败：%s", target, exc_info=True)
+
+    async def _push_file(
+        self, target: str, path: Path, file_name: str, config: PluginConfig
+    ) -> None:
+        """通过目标平台适配器主动上传文件（当前支持 aiocqhttp）。"""
+        parts = str(target).split(":", 2)
+        if len(parts) != 3:
+            raise RuntimeError(f"无法解析通知目标：{target}")
+        platform_name, message_type, session_id = parts
+        platform = None
+        for candidate in self.context.platform_manager.platform_insts:
+            if candidate.meta().id == platform_name:
+                platform = candidate
+                break
+        if platform is None:
+            raise RuntimeError(f"找不到平台适配器：{platform_name}")
+        bot = getattr(platform, "bot", None)
+        if bot is None:
+            raise RuntimeError("当前平台不支持主动文件推送")
+        event = _PushUploadEvent(
+            target,
+            message_type == "GroupMessage",
+            session_id,
+            bot,
+        )
+        await upload_pdf(event, path, file_name, config.callback_api_base)
+
+    # ---- Web API（订阅管理页） -----------------------------------------
+
+    async def web_subscriptions(self):
+        from astrbot.api.web import json_response
+
+        config = PluginConfig.from_mapping(self.raw_config)
+        store = self._subscription_store()
+        return json_response(
+            {
+                "subscriptions": [
+                    item.to_dict() for item in (store.load() if store else [])
+                ],
+                "defaults": self._subscription_defaults(config),
+                "config": {
+                    "enabled": config.enabled,
+                    "allow_group": config.allow_group,
+                    "default_file_type": config.default_file_type,
+                    "preview_pages": config.preview_pages,
+                    "encrypt_pdf": config.encrypt_pdf,
+                    "cache_albums": config.cache_albums,
+                    "split_auto": config.split_auto,
+                },
+            }
+        )
+
+    async def web_subscription_save(self):
+        from astrbot.api.web import error_response, json_response, request
+
+        payload = await request.json(default={})
+        album_id = normalize_album_id(str(payload.get("album_id", "")))
+        if not album_id:
+            return error_response("album_id 不合法")
+        store = self._subscription_store()
+        if store is None:
+            return error_response("插件数据目录不可用")
+        config = PluginConfig.from_mapping(self.raw_config)
+        defaults = self._subscription_defaults(config)
+        kind = payload.get("schedule_kind") or defaults["schedule_kind"]
+        value = payload.get("schedule_value") or defaults["schedule_value"]
+        try:
+            if kind == "loop":
+                value = f"{parse_loop_interval(value)}s"
+            elif kind == "cron":
+                value = validate_cron(value)
+            else:
+                return error_response("schedule_kind 只能是 loop 或 cron")
+            notice_cron = validate_cron(
+                payload.get("notice_cron") or defaults["notice_cron"]
+            )
+        except SubscriptionError as exc:
+            return error_response(str(exc))
+        targets = [
+            str(item).strip()
+            for item in payload.get("targets") or []
+            if str(item).strip()
+        ]
+        if not targets:
+            return error_response("targets 不能为空")
+        file_type = parse_default_file_type(
+            payload.get("file_type") or defaults["file_type"]
+        )
+        push_mode = str(
+            payload.get("push_mode") or defaults["push_mode"]
+        ).lower()
+        if push_mode not in {"file", "notice"}:
+            return error_response("push_mode 只能是 file 或 notice")
+        timing = str(
+            payload.get("notice_timing") or defaults["notice_timing"]
+        ).lower()
+        if timing not in {"realtime", "cron"}:
+            return error_response("notice_timing 只能是 realtime 或 cron")
+        now = datetime.now()
+        existing = store.get(album_id)
+        subscription = Subscription(
+            album_id=album_id,
+            album_title=str(payload.get("album_title") or ""),
+            schedule_kind=kind,
+            schedule_value=value,
+            file_type=file_type,
+            push_mode=push_mode,
+            notice_type=str(payload.get("notice_type") or "group").lower(),
+            targets=targets,
+            notice_timing=timing,
+            notice_cron=notice_cron,
+            seen_pids=existing.seen_pids if existing else [],
+            pending_pids=existing.pending_pids if existing else [],
+            last_check_at=existing.last_check_at if existing else "",
+            next_run_at=next_run(kind, value, now).isoformat(timespec="seconds"),
+            next_notice_at=(
+                next_run("cron", notice_cron, now).isoformat(timespec="seconds")
+                if timing == "cron"
+                else ""
+            ),
+            created_at=existing.created_at if existing else now_text(),
+        )
+        store.upsert(subscription)
+        return json_response({"saved": True, "subscription": subscription.to_dict()})
+
+    async def web_subscription_delete(self):
+        from astrbot.api.web import error_response, json_response, request
+
+        payload = await request.json(default={})
+        album_id = normalize_album_id(str(payload.get("album_id", "")))
+        if not album_id:
+            return error_response("album_id 不合法")
+        store = self._subscription_store()
+        if store is None:
+            return error_response("插件数据目录不可用")
+        return json_response({"deleted": store.delete(album_id)})
+
+    async def web_settings_save(self):
+        from astrbot.api.web import error_response, json_response, request
+
+        payload = await request.json(default={})
+        store = self._subscription_store()
+        if store is None:
+            return error_response("插件数据目录不可用")
+        allowed = {
+            "schedule_kind",
+            "schedule_value",
+            "file_type",
+            "push_mode",
+            "notice_type",
+            "notice_sids",
+            "notice_timing",
+            "notice_cron",
+        }
+        defaults = {
+            key: payload[key]
+            for key in allowed
+            if key in payload and str(payload[key]).strip()
+        }
+        store.save_defaults(defaults)
+        return json_response({"saved": True, "defaults": defaults})
 
     # ---- 任务主流程 ---------------------------------------------------
 

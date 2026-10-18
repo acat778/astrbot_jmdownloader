@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JM 订阅管理</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 20px; background: #f6f7f9; color: #1f2328; }
+    html[data-theme="dark"] body { background: #16181d; color: #e6e6e6; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    .muted { opacity: .65; font-size: 12px; margin-bottom: 18px; }
+    section { background: #fff; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    html[data-theme="dark"] section { background: #21242b; box-shadow: none; }
+    h2 { font-size: 15px; margin: 0 0 12px; }
+    label { display: block; font-size: 12px; margin: 8px 0 4px; opacity: .8; }
+    input, select, textarea { width: 100%; box-sizing: border-box; padding: 7px 9px; border: 1px solid #d0d7de; border-radius: 6px; background: transparent; color: inherit; font-size: 13px; }
+    html[data-theme="dark"] input, html[data-theme="dark"] select, html[data-theme="dark"] textarea { border-color: #3a3f4a; }
+    textarea { min-height: 64px; resize: vertical; }
+    button { margin-top: 12px; padding: 8px 14px; border: 0; border-radius: 6px; background: #2563eb; color: #fff; font-size: 13px; cursor: pointer; }
+    button.secondary { background: #64748b; }
+    button.danger { background: #dc2626; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+    html[data-theme="dark"] th, html[data-theme="dark"] td { border-bottom-color: #333842; }
+    code { font-size: 12px; }
+    .out { white-space: pre-wrap; font-size: 12px; min-height: 18px; margin-top: 10px; color: #0f766e; }
+    .err { color: #b91c1c; }
+    .empty { opacity: .6; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>JM 订阅管理</h1>
+  <div class="muted">插件：astrbot_jmdownloader · 订阅后按周期检查更新并主动推送</div>
+
+  <section>
+    <h2>默认值（可被命令参数覆盖）</h2>
+    <div class="grid">
+      <div><label>订阅方式</label><select id="def-kind"><option value="loop">loop（固定间隔）</option><option value="cron">cron（定时）</option></select></div>
+      <div><label>间隔 / cron 表达式</label><input id="def-value" placeholder="6h 或 0 9 * * *" /></div>
+      <div><label>推送文件格式</label><select id="def-file"><option>pdf</option><option>zip</option><option>7z</option><option>tar</option><option>tar.gz</option><option>tar.bz2</option><option>tar.xz</option></select></div>
+      <div><label>更新后推送</label><select id="def-push"><option value="file">文件 + 通知</option><option value="notice">仅消息通知</option></select></div>
+      <div><label>通知目标</label><select id="def-notice-type"><option value="group">群聊</option><option value="user">私聊</option></select></div>
+      <div><label>通知会话 ID（逗号分隔，留空=当前会话）</label><input id="def-sids" placeholder="123456,234567" /></div>
+      <div><label>通知时机</label><select id="def-timing"><option value="realtime">realtime 立即</option><option value="cron">cron 定时汇总</option></select></div>
+      <div><label>通知 cron 表达式</label><input id="def-notice-cron" placeholder="0 9 * * *" /></div>
+    </div>
+    <button id="save-defaults">保存默认值</button>
+    <div class="out" id="defaults-out"></div>
+  </section>
+
+  <section>
+    <h2>订阅列表</h2>
+    <table>
+      <thead><tr><th>本子</th><th>方式</th><th>格式</th><th>推送</th><th>目标</th><th>下次检查</th><th></th></tr></thead>
+      <tbody id="sub-list"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>新建 / 编辑订阅</h2>
+    <div class="grid">
+      <div><label>漫画 ID</label><input id="sub-album" placeholder="123456" /></div>
+      <div><label>订阅方式</label><select id="sub-kind"><option value="loop">loop</option><option value="cron">cron</option></select></div>
+      <div><label>间隔 / cron 表达式</label><input id="sub-value" placeholder="6h 或 0 9 * * *" /></div>
+      <div><label>推送格式</label><select id="sub-file"><option>pdf</option><option>zip</option><option>7z</option><option>tar</option><option>tar.gz</option><option>tar.bz2</option><option>tar.xz</option></select></div>
+      <div><label>更新后推送</label><select id="sub-push"><option value="file">文件 + 通知</option><option value="notice">仅消息通知</option></select></div>
+      <div><label>通知目标</label><select id="sub-notice-type"><option value="group">群聊</option><option value="user">私聊</option></select></div>
+      <div><label>通知时机</label><select id="sub-timing"><option value="realtime">realtime</option><option value="cron">cron</option></select></div>
+      <div><label>通知 cron</label><input id="sub-notice-cron" placeholder="0 9 * * *" /></div>
+    </div>
+    <label>通知目标会话（每行一个 unified_msg_origin，如 aiocqhttp:GroupMessage:123）</label>
+    <textarea id="sub-targets" placeholder="aiocqhttp:GroupMessage:123456"></textarea>
+    <button id="save-sub">保存订阅</button>
+    <div class="out" id="sub-out"></div>
+  </section>
+
+  <section>
+    <h2>现有插件配置（只读）</h2>
+    <div id="config-summary" class="muted">加载中…</div>
+    <div class="muted">其余配置项在 AstrBot「插件配置」页修改。</div>
+  </section>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

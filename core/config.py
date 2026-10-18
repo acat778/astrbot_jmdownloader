@@ -119,6 +119,15 @@ class PluginConfig:
     cache_albums: int = 5
     preview_pages: int = 10
     default_file_type: str = "pdf"
+    sub_default_schedule_kind: str = "loop"
+    sub_default_schedule_value: str = "6h"
+    sub_default_type: str = "pdf"
+    sub_default_push_mode: str = "file"
+    sub_default_notice_type: str = "group"
+    sub_default_notice_sids: str = ""
+    sub_default_notice_timing: str = "realtime"
+    sub_default_notice_cron: str = "0 9 * * *"
+    sub_check_interval: int = 60
     cookies: str = ""
     proxy: str = ""
     timeout: int = 20
@@ -153,6 +162,33 @@ class PluginConfig:
             ),
             default_file_type=parse_default_file_type(
                 source.get("default_file_type")
+            ),
+            sub_default_schedule_kind=str(
+                source.get("sub_default_schedule_kind") or "loop"
+            ).strip().lower(),
+            sub_default_schedule_value=str(
+                source.get("sub_default_schedule_value") or "6h"
+            ).strip(),
+            sub_default_type=parse_default_file_type(
+                source.get("sub_default_type")
+            ),
+            sub_default_push_mode=str(
+                source.get("sub_default_push_mode") or "file"
+            ).strip().lower(),
+            sub_default_notice_type=str(
+                source.get("sub_default_notice_type") or "group"
+            ).strip().lower(),
+            sub_default_notice_sids=str(
+                source.get("sub_default_notice_sids") or ""
+            ).strip(),
+            sub_default_notice_timing=str(
+                source.get("sub_default_notice_timing") or "realtime"
+            ).strip().lower(),
+            sub_default_notice_cron=str(
+                source.get("sub_default_notice_cron") or "0 9 * * *"
+            ).strip(),
+            sub_check_interval=_as_int(
+                source.get("sub_check_interval"), 60, 30, 600
             ),
             cookies=str(source.get("cookies") or ""),
             proxy=str(source.get("proxy") or ""),
