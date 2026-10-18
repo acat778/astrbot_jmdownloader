@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import re
 from asyncio import Lock, Semaphore, gather, sleep, to_thread
 from contextlib import suppress
@@ -152,7 +154,7 @@ HELP_TEXT = """JM PDF 下载器命令说明
 
 /jm <漫画ID> --info
     查询本子详情（标题、作者、标签、页数/章节、日期、简介等），
-    同时下载并发送封面；详情优先渲染成图片，失败回退文字；不下载章节。
+    并把封面与详情排版到同一张图片发送；渲染失败回退文字+封面；不下载章节。
 
 /jm <漫画ID> --sub <loop 间隔|cron 表达式>
     订阅本子更新：按 loop（如 30m/6h/1d）或 cron（5 段表达式）检查；
@@ -949,69 +951,146 @@ class JmDownloaderPlugin(Star):
 
     # ---- 详情 ---------------------------------------------------------
 
+    INFO_CARD_TEMPLATE = """
+<div class="jm-info-card">
+  {% if cover %}<img class="jm-info-cover" src="{{ cover }}" alt="cover" />{% endif %}
+  <div class="jm-info-body">
+    <div class="jm-info-title">JM{{ album_id }}「{{ title }}」</div>
+    {% for row in rows %}
+    <div class="jm-info-row"><span class="k">{{ row[0] }}</span><span class="v">{{ row[1] }}</span></div>
+    {% endfor %}
+    {% if description %}<div class="jm-info-desc">{{ description }}</div>{% endif %}
+    <div class="jm-info-url">{{ url }}</div>
+  </div>
+</div>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f5f6f8; font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; }
+  .jm-info-card { display: flex; gap: 18px; width: 760px; padding: 22px; background: #ffffff; color: #1f2328; }
+  .jm-info-cover { width: 240px; max-height: 340px; object-fit: contain; border-radius: 8px; background: #eceff3; flex: none; }
+  .jm-info-body { flex: 1; min-width: 0; }
+  .jm-info-title { font-size: 21px; font-weight: 700; margin-bottom: 10px; word-break: break-all; }
+  .jm-info-row { display: flex; gap: 8px; font-size: 13px; line-height: 1.9; }
+  .jm-info-row .k { color: #6b7280; flex: none; width: 52px; }
+  .jm-info-row .v { word-break: break-all; }
+  .jm-info-desc { margin-top: 10px; font-size: 13px; line-height: 1.7; color: #374151; border-top: 1px solid #e5e7eb; padding-top: 9px; }
+  .jm-info-url { margin-top: 10px; font-size: 12px; color: #2563eb; word-break: break-all; }
+</style>
+"""
+
+    @staticmethod
+    def _cover_data_uri(cover: Path) -> str:
+        """把封面转成 JPEG data URI，便于一次性渲染进详情图。"""
+        from PIL import Image
+
+        with Image.open(cover) as image:
+            rgb = image.convert("RGB")
+            buffer = io.BytesIO()
+            rgb.save(buffer, format="JPEG", quality=88)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+
     async def _handle_info(
         self, event: AstrMessageEvent, config: PluginConfig, album_id: str
     ) -> str:
-        """查询并返回本子详情页信息（不下载）。"""
+        """查询本子详情，把封面与信息排版到同一张图片发送。"""
         source = JmSource(config)
         try:
             album = await to_thread(source.fetch_album, album_id)
         except JmDownloaderError as exc:
             return f"JM{album_id} {exc.user_message}"
         cover_dir = Path(mkdtemp(prefix="jm-info-", dir=str(JOB_TEMP_ROOT)))
+        cover_file: Path | None = None
         try:
-            cover = await to_thread(
+            cover_file = await to_thread(
                 source.fetch_album_cover,
                 album.album_id,
                 cover_dir / "cover.jpg",
             )
-            if cover is not None:
-                try:
-                    await event.send(
-                        MessageChain().file_image(str(cover))
+            rows: list[tuple[str, str]] = []
+            if album.authors:
+                rows.append(("作者", "、".join(album.authors)))
+            if album.works:
+                rows.append(("作品", "、".join(album.works)))
+            if album.actors:
+                rows.append(("角色", "、".join(album.actors)))
+            if album.tags:
+                rows.append(("标签", "、".join(album.tags)))
+            stats = [f"章节 {album.chapter_count}"]
+            if album.page_count:
+                stats.append(f"页数 {album.page_count}")
+            if album.comment_count:
+                stats.append(f"评论 {album.comment_count}")
+            rows.append(("统计", " · ".join(stats)))
+            dates = []
+            if album.publish_date:
+                dates.append(f"发布 {album.publish_date}")
+            if album.update_date:
+                dates.append(f"更新 {album.update_date}")
+            if dates:
+                rows.append(("日期", " · ".join(dates)))
+            if album.likes or album.views:
+                rows.append(
+                    (
+                        "热度",
+                        f"喜欢 {album.likes or '-'} · 观看 {album.views or '-'}",
                     )
-                except Exception:  # noqa: BLE001 - 封面失败不影响详情
-                    self.logger.warning("封面发送失败", exc_info=True)
-        finally:
-            rmtree(cover_dir, ignore_errors=True)
-        lines = [f"JM{album.album_id}「{album.title}」"]
-        if album.authors:
-            lines.append("作者：" + "、".join(album.authors))
-        if album.works:
-            lines.append("作品：" + "、".join(album.works))
-        if album.actors:
-            lines.append("角色：" + "、".join(album.actors))
-        if album.tags:
-            lines.append("标签：" + "、".join(album.tags))
-        stats = [f"章节 {album.chapter_count}"]
-        if album.page_count:
-            stats.append(f"页数 {album.page_count}")
-        if album.comment_count:
-            stats.append(f"评论 {album.comment_count}")
-        lines.append(" · ".join(stats))
-        dates = []
-        if album.publish_date:
-            dates.append(f"发布 {album.publish_date}")
-        if album.update_date:
-            dates.append(f"更新 {album.update_date}")
-        if dates:
-            lines.append(" · ".join(dates))
-        if album.likes or album.views:
-            lines.append(
-                "喜欢 {likes} · 观看 {views}".format(
-                    likes=album.likes or "-", views=album.views or "-"
                 )
-            )
-        if album.description:
             description = " ".join(album.description.split())
             if len(description) > 200:
                 description = description[:200] + "…"
-            lines.append("简介：" + description)
-        lines.append(f"详情页：https://18comic.vip/album/{album.album_id}")
-        text = "\n".join(lines)
-        if await self._send_rendered_text(event, text):
-            return ""
-        return text
+            url = f"https://18comic.vip/album/{album.album_id}"
+            if cover_file is not None:
+                try:
+                    cover_uri = await to_thread(
+                        self._cover_data_uri, cover_file
+                    )
+                    rendered = await self.html_render(
+                        self.INFO_CARD_TEMPLATE,
+                        {
+                            "cover": cover_uri,
+                            "album_id": album.album_id,
+                            "title": album.title,
+                            "rows": rows,
+                            "description": description,
+                            "url": url,
+                        },
+                        return_url=True,
+                        umo=getattr(event, "unified_msg_origin", None),
+                    )
+                    if rendered:
+                        chain = MessageChain()
+                        if rendered.startswith("http"):
+                            chain.url_image(rendered)
+                        else:
+                            chain.file_image(rendered)
+                        try:
+                            await event.send(chain)
+                            return ""
+                        except Exception:  # noqa: BLE001 - 回退到文本+封面
+                            self.logger.warning(
+                                "详情图发送失败，回退文字", exc_info=True
+                            )
+                except Exception:  # noqa: BLE001 - 回退到文字+封面
+                    self.logger.warning(
+                        "详情图渲染失败，回退文字", exc_info=True
+                    )
+            # 回退：先发封面（如有），再发文字版详情
+            if cover_file is not None:
+                try:
+                    await event.send(
+                        MessageChain().file_image(str(cover_file))
+                    )
+                except Exception:  # noqa: BLE001 - 封面失败不影响详情
+                    self.logger.warning("封面发送失败", exc_info=True)
+            lines = [f"JM{album.album_id}「{album.title}」"]
+            lines.extend(f"{key}：{value}" for key, value in rows)
+            if description:
+                lines.append("简介：" + description)
+            lines.append(f"详情页：{url}")
+            return "\n".join(lines)
+        finally:
+            rmtree(cover_dir, ignore_errors=True)
 
     # ---- 订阅 ---------------------------------------------------------
 

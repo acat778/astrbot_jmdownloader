@@ -252,23 +252,28 @@ def test_info_command_sends_cover_image(plugin_main, monkeypatch, tmp_path):
     assert "测试本" in text
 
 
-def test_info_command_sends_image_when_render_available(
+def test_info_command_renders_cover_and_detail_as_one_image(
     plugin_main, monkeypatch
 ):
     album = _album()
     monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
     plugin = plugin_main.JmDownloaderPlugin(None, {})
     event = FakeEvent()
+    rendered_calls: list[str] = []
 
-    async def fake_render(event, text):
-        return "https://example.invalid/info.jpg"
+    async def fake_html_render(tmpl, data, **kwargs):
+        rendered_calls.append(data["title"])
+        assert data["cover"].startswith("data:image/jpeg;base64,")
+        return "https://example.invalid/info-card.jpg"
 
-    monkeypatch.setattr(plugin, "_render_text_image", fake_render)
+    monkeypatch.setattr(plugin, "html_render", fake_html_render, raising=False)
     reply = asyncio.run(plugin._run_command(event, PluginConfig(), "999 --info"))
     assert reply == ""
-    assert len(event.chains) == 2
-    assert event.chains[0].images[0][0] == "file"  # 封面
-    assert event.chains[1].images == [("url", "https://example.invalid/info.jpg")]
+    assert rendered_calls == ["测试本"]
+    assert len(event.chains) == 1  # 封面+详情合成为一张图
+    assert event.chains[0].images == [
+        ("url", "https://example.invalid/info-card.jpg")
+    ]
 
 
 def test_run_job_and_fallback_are_coroutines(plugin_main):
