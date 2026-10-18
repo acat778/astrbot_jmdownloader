@@ -117,7 +117,7 @@ class PluginConfig:
     split_max_volumes: int = 8
     upload_retries: int = 2
     cache_albums: int = 5
-    preview_images: int = 10
+    preview_pages: int = 10
     default_file_type: str = "pdf"
     cookies: str = ""
     proxy: str = ""
@@ -145,8 +145,11 @@ class PluginConfig:
             ),
             upload_retries=_as_int(source.get("upload_retries"), 2, 0, 5),
             cache_albums=_as_int(source.get("cache_albums"), 5, 0, 50),
-            preview_images=_as_int(
-                source.get("preview_images"), 10, 1, 50
+            preview_pages=_as_int(
+                source.get("preview_pages", source.get("preview_images")),
+                10,
+                1,
+                50,
             ),
             default_file_type=parse_default_file_type(
                 source.get("default_file_type")

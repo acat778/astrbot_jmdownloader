@@ -197,13 +197,31 @@ class JmSource:
             )
         return image_dir, images
 
-    def preview_images(
-        self, pid: str, images_root: Path, limit: int
-    ) -> list[Path]:
-        """下载一章图片并返回前 ``limit`` 张，用于预览。"""
+    def preview_pdf(
+        self,
+        pid: str,
+        images_root: Path,
+        pdf_path: Path,
+        limit: int,
+    ) -> tuple[int, int]:
+        """下载一章图片，取前 ``limit`` 页合成预览 PDF，返回 (页数, 字节数)。"""
         photo_id = str(pid)
-        _, images = self._download_photo_images(photo_id, images_root)
-        return images[: max(1, int(limit))]
+        image_dir, images = self._download_photo_images(photo_id, images_root)
+        selected = images[: max(1, int(limit))]
+        try:
+            page_count = build_chapter_pdf(selected, pdf_path)
+        except PdfBuildError as exc:
+            reason = f"章节 {photo_id} 预览 PDF 生成失败（{exc.user_message}）"
+            raise ChapterDownloadError(reason, photo_id) from exc
+        finally:
+            shutil.rmtree(image_dir, ignore_errors=True)
+        try:
+            size_bytes = pdf_path.stat().st_size
+        except OSError as exc:
+            raise ChapterDownloadError(
+                f"章节 {photo_id} 的预览 PDF 未落盘", photo_id
+            ) from exc
+        return page_count, size_bytes
 
     def download_chapter(
         self,

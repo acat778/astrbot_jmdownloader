@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import tarfile
 import inspect
 from pathlib import Path
 
@@ -560,16 +561,19 @@ class _FakeSource:
     def fetch_album(self, album_id: str) -> AlbumInfo:
         return self.album
 
-    def preview_images(self, pid, images_root, limit):
+    def preview_pdf(self, pid, images_root, pdf_path, limit):
         from PIL import Image
 
+        from astrbot_jmdownloader.core.pdf import build_chapter_pdf
+
         images_root.mkdir(parents=True, exist_ok=True)
-        paths = []
+        images = []
         for index in range(1, min(limit, 3) + 1):
             path = images_root / f"{pid}-{index}.png"
             Image.new("RGB", (20, 30), color=(index, 1, 1)).save(path)
-            paths.append(path)
-        return paths
+            images.append(path)
+        page_count = build_chapter_pdf(images, pdf_path)
+        return page_count, pdf_path.stat().st_size
 
     def download_chapter(self, pid, images_root, pdf_path) -> ChapterArtifact:
         from PIL import Image
@@ -736,16 +740,20 @@ def test_run_job_archive_tar_refuses_password(
     assert uploads == []
 
 
-def test_run_job_preview_sends_images(plugin_main, monkeypatch, tmp_path):
+def test_run_job_preview_pdf_default_type(
+    plugin_main, monkeypatch, tmp_path
+):
+    from astrbot_jmdownloader.core.pdf import pdf_page_count
+
     album = _album()
     monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
     plugin = plugin_main.JmDownloaderPlugin(
-        None, {"preview_images": 10, "cache_albums": 0}
+        None, {"encrypt_pdf": False, "cache_albums": 0}
     )
-    uploads: list[str] = []
+    uploads: list[tuple[str, Path]] = []
 
     async def fake_upload(event, path, file_name, config):
-        uploads.append(file_name)
+        uploads.append((file_name, path))
         return {}
 
     monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
@@ -758,34 +766,129 @@ def test_run_job_preview_sends_images(plugin_main, monkeypatch, tmp_path):
             "999",
             PluginConfig.from_mapping(plugin.raw_config),
             job_root,
-            preview=0,
-        )
-    )
-    assert "预览完成" in text and "已发送 3 张" in text
-    assert uploads == []
-    image_chains = [chain for chain in event.chains if chain.images]
-    assert len(image_chains) == 3
-
-
-def test_run_job_preview_count_and_scope(plugin_main, monkeypatch, tmp_path):
-    album = _album()
-    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
-    plugin = plugin_main.JmDownloaderPlugin(None, {"cache_albums": 0})
-    event = FakeEvent()
-    job_root = tmp_path / "preview-scope"
-    job_root.mkdir()
-    text = asyncio.run(
-        plugin._run_job(
-            event,
-            "999",
-            PluginConfig(),
-            job_root,
-            selector=ChapterQuery("head", 2),
+            chapter_no=2,
             preview=2,
         )
     )
-    assert "第 1 章" in text
-    assert "已发送 2 张" in text
+    assert "前 2 页，pdf" in text
+    assert len(uploads) == 1
+    file_name, uploaded = uploads[0]
+    assert "预览2页" in file_name and file_name.endswith(".pdf")
+    assert pdf_page_count(uploaded) == 2
+    assert not any(chain.images for chain in event.chains)
+
+
+def test_run_job_preview_respects_configured_type(
+    plugin_main, monkeypatch, tmp_path
+):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(
+        None, {"encrypt_pdf": False, "cache_albums": 0}
+    )
+    uploads: list[tuple[str, Path]] = []
+
+    async def fake_upload(event, path, file_name, config):
+        uploads.append((file_name, path))
+        return {}
+
+    monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
+    job_root = tmp_path / "preview-tar"
+    job_root.mkdir()
+    configured = PluginConfig.from_mapping(
+        {"basic": {"default_file_type": "tar.gz"}, "encrypt_pdf": False}
+    )
+    text = asyncio.run(
+        plugin._run_job(
+            FakeEvent(),
+            "999",
+            configured,
+            job_root,
+            chapter_no=1,
+            preview=2,
+            file_type="tar.gz",
+        )
+    )
+    assert "tar.gz" in text
+    file_name, uploaded = uploads[0]
+    assert file_name.endswith(".tar.gz")
+    with tarfile.open(uploaded, "r:gz") as archive:
+        names = archive.getnames()
+    assert len(names) == 1 and names[0].endswith(".pdf")
+
+
+def test_run_job_preview_zip_with_password(
+    plugin_main, monkeypatch, tmp_path
+):
+    pyzipper = pytest.importorskip("pyzipper")
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(
+        None, {"cache_albums": 0}
+    )
+    uploads: list[Path] = []
+
+    async def fake_upload(event, path, file_name, config):
+        uploads.append(path)
+        return {}
+
+    monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
+    job_root = tmp_path / "preview-zip"
+    job_root.mkdir()
+    configured = PluginConfig.from_mapping(
+        {
+            "basic": {"encrypt_pdf": True, "pdf_password": "PrePass123"},
+            "cache": {"cache_albums": 0},
+        }
+    )
+    text = asyncio.run(
+        plugin._run_job(
+            FakeEvent(),
+            "999",
+            configured,
+            job_root,
+            chapter_no=1,
+            preview=2,
+            file_type="zip",
+        )
+    )
+    assert "打开密码" not in text  # 预览消息本身不含密码；密码由统一发送逻辑处理
+    assert "已加密" in text
+    with pyzipper.AESZipFile(uploads[0]) as archive:
+        archive.setpassword(b"PrePass123")
+        assert len(archive.namelist()) == 1
+
+
+def test_run_job_preview_tar_refuses_password(
+    plugin_main, monkeypatch, tmp_path
+):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(None, {})
+    uploads: list[str] = []
+
+    async def fake_upload(event, path, file_name, config):
+        uploads.append(file_name)
+        return {}
+
+    monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
+    job_root = tmp_path / "preview-tar-pass"
+    job_root.mkdir()
+    configured = PluginConfig.from_mapping(
+        {"basic": {"encrypt_pdf": True, "pdf_password": "x"}}
+    )
+    text = asyncio.run(
+        plugin._run_job(
+            FakeEvent(),
+            "999",
+            configured,
+            job_root,
+            preview=2,
+            file_type="tar.gz",
+        )
+    )
+    assert "tar" in text and "不支持" in text
+    assert uploads == []
 
 
 def test_run_job_chapter_out_of_range(plugin_main, monkeypatch, tmp_path):

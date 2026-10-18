@@ -31,10 +31,10 @@
           "encrypt_pdf": true
         }
       },
-      "preview_images": {
+      "preview_pages": {
         "type": "int",
         "default": 10,
-        "description": "预览张数（--pre 未指定数量或写 0 时使用，1-50）：取所选范围第一章的前 N 张图片"
+        "description": "预览页数（--pre 未指定数量或写 0 时使用，1-50）：取所选范围第一章的前 N 页生成预览文件"
       }
     }
   },

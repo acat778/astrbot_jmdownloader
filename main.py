@@ -119,15 +119,16 @@ HELP_TEXT = """JM PDF 下载器命令说明
     未写 --type 时使用配置中的「默认发送格式」。
 
 /jm <漫画ID> --pre [N]
-    预览模式：取所选范围（整本/单章/一条范围）第一章的前 N 张图片直接发送；
-    N 省略或写 0 时使用配置 preview_images（默认 10）。可与 --type 和章节筛选混用。
+    预览模式：取所选范围（整本/单章/一条范围）第一章的前 N 页，
+    按 --type 或配置 default_file_type 生成 PDF/压缩包发送，密码按配置；
+    N 省略或写 0 时使用配置 preview_pages（默认 10）。
 
 规则：
 1. -- 开头的开关可以放在 /jm 后的任意位置，例如 /jm --no-cache 123456。
 2. 章节号与 --head/--tail/--latest/--range 不能同时使用，筛选开关之间也互斥。
 3. --no-cache 可以和任意章节筛选组合，例如 /jm 123456 --head 3 --no-cache。
 4. --type 可以放在任意位置，例如 /jm 123456 --head 3 --type zip。
-5. --pre 可与 --type、--head/--tail/--latest/--range 组合，顺序不限；预览模式只发图片，不发 PDF/压缩包。
+5. --pre 可与 --type、--head/--tail/--latest/--range 组合，顺序不限；预览文件按所选/默认格式生成。
 6. PDF/压缩包默认使用随机密码加密，上传完成后单独发送密码；固定密码在插件配置中填写。"""
 
 GROUP_BLOCK_MESSAGES = {
@@ -214,6 +215,29 @@ def chapter_pdf_name(
     """单章模式的上传文件名；章节标题为空时回退到相册标题。"""
     caption = _filename_fragment(chapter_title or album_title, 40)
     return _pdf_stem(f"JM{album_id}", f"章{chapter_no}of{total}", caption)
+
+
+def album_ref(album: AlbumInfo) -> str:
+    """相册的展示引用。"""
+    return f"JM{album.album_id}"
+
+
+def preview_pdf_name(
+    album_id: str,
+    album_title: str,
+    chapter_no: int,
+    total: int,
+    chapter_title: str,
+    pages: int,
+) -> str:
+    """预览文件的上传文件名：标注章节与预览页数。"""
+    caption = _filename_fragment(chapter_title or album_title, 30)
+    return _pdf_stem(
+        f"JM{album_id}",
+        f"章{chapter_no}of{total}",
+        f"预览{pages}页",
+        caption,
+    )
 
 
 _CHAPTER_NO_RE = re.compile(
@@ -716,6 +740,7 @@ class JmDownloaderPlugin(Star):
                     scope,
                     config,
                     preview,
+                    file_type,
                     job_root,
                 )
             if file_type != "pdf":
@@ -1377,39 +1402,103 @@ class JmDownloaderPlugin(Star):
         scope: "_Scope",
         config: PluginConfig,
         requested: int,
+        file_type: str,
         job_root: Path,
     ) -> str:
-        """取所选范围第一章的前 N 张图片直接发送，不生成 PDF/压缩包。"""
+        """取所选范围第一章的前 N 页，按指定/默认格式生成预览文件并上传。"""
         chapters = scope.chapters if scope.chapters is not None else album.chapters
         first = chapters[0]
-        count = requested if requested not in (None, 0) else config.preview_images
+        count = requested if requested not in (None, 0) else config.preview_pages
         count = max(1, min(50, int(count)))
         position = chapter_position(album, first.pid)
         title = _filename_fragment(first.title, 24) or "无标题"
         await self._say(
             event,
             f"JM{album.album_id} 第 {position} 章「{title}」预览："
-            f"正在获取前 {count} 张图片…",
+            f"正在获取前 {count} 页…",
         )
-        images = await to_thread(
-            source.preview_images,
+        raw_pdf = job_root / "preview.pdf"
+        page_count, _ = await to_thread(
+            source.preview_pdf,
             first.pid,
-            job_root / "preview" / first.pid,
+            job_root / "preview-images" / first.pid,
+            raw_pdf,
             count,
         )
-        sent = 0
-        for image in images:
-            try:
-                await event.send(MessageChain().file_image(str(image)))
-            except Exception:  # noqa: BLE001 - 单张图片发送失败就停止
-                self.logger.warning("预览图片发送失败", exc_info=True)
-                break
-            sent += 1
+        pdf_name = preview_pdf_name(
+            album.album_id,
+            album.title,
+            position,
+            album.chapter_count,
+            first.title,
+            page_count,
+        )
+        password = config.pdf_password if config.encrypt_pdf else ""
+        if not config.encrypt_pdf:
+            password = ""
+        elif not password:
+            password = generate_pdf_password()
+
+        if file_type == "pdf":
+            upload_path = raw_pdf
+            if password:
+                encrypted = job_root / "preview-encrypted.pdf"
+                try:
+                    upload_path = await to_thread(
+                        encrypt_pdf, raw_pdf, encrypted, password
+                    )
+                except Exception as exc:  # noqa: BLE001 - 加密失败不发明文
+                    raise PdfBuildError(
+                        "PDF 加密失败，已取消上传"
+                        "（请确认已安装 pypdf[crypto]）。"
+                    ) from exc
+            file_name = pdf_name
+        else:
+            fmt = file_type
+            archive_password = password if fmt in {"zip", "7z"} else ""
+            if password and not archive_password:
+                return (
+                    f"{album_ref(album)} 预览文件已生成（{page_count} 页），"
+                    "但 tar 系列压缩包不支持设置密码；"
+                    "请改用 --type zip/7z，或关闭 PDF 加密后再使用 tar 系列。"
+                )
+            archive_path = job_root / f"preview{archive_suffix(fmt)}"
+            await to_thread(
+                build_archive,
+                [(raw_pdf, pdf_name)],
+                archive_path,
+                fmt,
+                archive_password,
+            )
+            upload_path = archive_path
+            file_name = pdf_name[: -len(".pdf")] + archive_suffix(fmt)
+        size = upload_path.stat().st_size
+        try:
+            await self._upload_with_retries(
+                event, upload_path, file_name, config
+            )
+        except UploadConfigError as exc:
+            return (
+                f"{album_ref(album)} 第 {position} 章预览（{page_count} 页，"
+                f"{file_type}）已生成，但无法上传：{exc.user_message}"
+            )
+        except Exception as exc:  # noqa: BLE001 - 上传失败回显原因
+            self.logger.warning(
+                "%s 预览上传失败", album_ref(album), exc_info=True
+            )
+            return (
+                f"{album_ref(album)} 第 {position} 章预览（{page_count} 页，"
+                f"{file_type}）已生成，但上传失败；原因："
+                f"{self._short_error(exc)}；详因见 AstrBot 日志。"
+            )
+        encrypt_note = "，已加密" if password else ""
         return (
-            f"JM{album.album_id} 第 {position} 章「{title}」预览完成："
-            f"已发送 {sent} 张（请求前 {count} 张）。"
+            f"{album_ref(album)} 第 {position} 章「{title}」预览"
+            f"（前 {page_count} 页，{file_type}）已作为 QQ 文件上传"
+            f"（{format_mib(size)}{encrypt_note}）。"
         )
 
+    # ---- 压缩包投递 ---------------------------------------------------
     # ---- 压缩包投递 ---------------------------------------------------
 
     @staticmethod

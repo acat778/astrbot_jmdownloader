@@ -62,7 +62,7 @@ def test_removed_legacy_flat_keys():
         "callback_api_base",
         "upload_retries",
         "cache_albums",
-        "preview_images",
+        "preview_pages",
         "default_file_type",
         "cookies",
         "proxy",
