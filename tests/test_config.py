@@ -19,6 +19,8 @@ def test_defaults():
     assert config.split_size_mb == 100
     assert config.split_max_volumes == 8
     assert config.cache_albums == 5
+    assert config.preview_images == 10
+    assert config.default_file_type == "pdf"
     assert config.max_concurrent == 1
 
 
@@ -47,6 +49,24 @@ def test_bool_and_int_clamping():
     assert config.timeout == 5
     assert config.image_threads == 32
     assert config.max_concurrent == 3
+    assert PluginConfig.from_mapping(
+        {"basic": {"preview_images": 3}}
+    ).preview_images == 3
+    assert PluginConfig.from_mapping(
+        {"basic": {"preview_images": 99}}
+    ).preview_images == 50
+    assert PluginConfig.from_mapping(
+        {"basic": {"preview_images": 0}}
+    ).preview_images == 1
+    assert PluginConfig.from_mapping(
+        {"basic": {"default_file_type": "zip"}}
+    ).default_file_type == "zip"
+    assert PluginConfig.from_mapping(
+        {"basic": {"default_file_type": "TAR.GZ"}}
+    ).default_file_type == "tar.gz"
+    assert PluginConfig.from_mapping(
+        {"basic": {"default_file_type": "rar"}}
+    ).default_file_type == "pdf"
 
 
 def test_split_enabled_semantics():

@@ -13,6 +13,11 @@
         "default": true,
         "description": "群聊可用性：关闭后仅私聊可以触发 /jm"
       },
+      "default_file_type": {
+        "type": "string",
+        "default": "pdf",
+        "description": "默认发送格式（未写 --type 时生效）：pdf / zip / 7z / tar / tar.gz / tar.bz2 / tar.xz；非法值按 pdf 处理"
+      },
       "encrypt_pdf": {
         "type": "bool",
         "default": true,
@@ -25,6 +30,11 @@
         "condition": {
           "encrypt_pdf": true
         }
+      },
+      "preview_images": {
+        "type": "int",
+        "default": 10,
+        "description": "预览张数（--pre 未指定数量或写 0 时使用，1-50）：取所选范围第一章的前 N 张图片"
       }
     }
   },

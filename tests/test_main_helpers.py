@@ -126,6 +126,7 @@ def test_command_releases_semaphore_after_job(plugin_main, monkeypatch):
         no_cache=False,
         selector=None,
         file_type="pdf",
+        preview=None,
     ) -> str:
         assert plugin._semaphore.locked() is True  # noqa: SLF001
         return "完成"
@@ -223,6 +224,45 @@ def test_normalize_chapter_no(plugin_main):
             normalize(raw)
 
 
+def test_run_command_uses_configured_default_file_type(plugin_main):
+    plugin = plugin_main.JmDownloaderPlugin(None, {})
+    calls: list[tuple] = []
+
+    async def fake_run_job(
+        event,
+        album_id,
+        config,
+        job_root,
+        chapter_no=None,
+        no_cache=False,
+        selector=None,
+        file_type="pdf",
+        preview=None,
+    ) -> str:
+        calls.append((album_id, file_type, preview))
+        return "ok"
+
+    plugin._run_job = fake_run_job  # type: ignore[assignment]
+    event = FakeEvent()
+    configured = PluginConfig.from_mapping(
+        {"basic": {"default_file_type": "zip"}}
+    )
+    assert asyncio.run(plugin._run_command(event, configured, "123456")) == "ok"
+    assert calls[-1] == ("123456", "zip", None)
+    # 显式 --type 覆盖配置默认值
+    assert (
+        asyncio.run(plugin._run_command(event, configured, "123456 --type 7z"))
+        == "ok"
+    )
+    assert calls[-1] == ("123456", "7z", None)
+    # 未知默认格式回退 pdf
+    fallback = PluginConfig.from_mapping(
+        {"basic": {"default_file_type": "rar"}}
+    )
+    assert asyncio.run(plugin._run_command(event, fallback, "123456")) == "ok"
+    assert calls[-1] == ("123456", "pdf", None)
+
+
 def test_parse_command_arguments(plugin_main):
     from astrbot_jmdownloader.core.models import ChapterQuery, CommandRequest
 
@@ -274,11 +314,29 @@ def test_parse_command_arguments(plugin_main):
     assert parse("--type 7z 123456 3") == CommandRequest(
         "123456", chapter_no=3, file_type="7z"
     )
-    assert parse("123456 --type pdf") == CommandRequest("123456")
+    assert parse("123456 --type pdf") == CommandRequest(
+        "123456", file_type="pdf"
+    )
     with pytest.raises(ValueError):
         parse("123456 --type rar")
     with pytest.raises(ValueError):
         parse("123456 --type")
+    assert parse("123456 --pre") == CommandRequest(
+        "123456", preview=0
+    )
+    assert parse("123456 --pre 5") == CommandRequest(
+        "123456", preview=5
+    )
+    assert parse("123456 --pre=5 --head 2") == CommandRequest(
+        "123456", selector=ChapterQuery("head", 2), preview=5
+    )
+    assert parse("--pre 5 123456") == CommandRequest("123456", preview=5)
+    assert parse("123456 --pre 0") == CommandRequest("123456", preview=0)
+    with pytest.raises(ValueError):
+        parse("123456 --pre 99")
+    with pytest.raises(ValueError):
+        parse("123456 --pre=abc")
+
 
     with pytest.raises(ValueError):
         parse("")
@@ -450,9 +508,10 @@ def test_run_command_dispatches_chapter_and_no_cache(plugin_main):
         no_cache=False,
         selector=None,
         file_type="pdf",
+        preview=None,
     ) -> str:
         calls.append(
-            (album_id, chapter_no, no_cache, selector, file_type)
+            (album_id, chapter_no, no_cache, selector, file_type, preview)
         )
         return "ok"
 
@@ -460,19 +519,19 @@ def test_run_command_dispatches_chapter_and_no_cache(plugin_main):
     event = FakeEvent()
 
     assert asyncio.run(plugin._run_command(event, PluginConfig(), "123456")) == "ok"
-    assert calls[-1] == ("123456", None, False, None, "pdf")
+    assert calls[-1] == ("123456", None, False, None, "pdf", None)
     assert (
         asyncio.run(plugin._run_command(event, PluginConfig(), "123456 3"))
         == "ok"
     )
-    assert calls[-1] == ("123456", 3, False, None, "pdf")
+    assert calls[-1] == ("123456", 3, False, None, "pdf", None)
     assert (
         asyncio.run(
             plugin._run_command(event, PluginConfig(), "--no-cache 123456 2")
         )
         == "ok"
     )
-    assert calls[-1] == ("123456", 2, True, None, "pdf")
+    assert calls[-1] == ("123456", 2, True, None, "pdf", None)
     assert (
         asyncio.run(
             plugin._run_command(event, PluginConfig(), "123456 --head 2")
@@ -482,6 +541,7 @@ def test_run_command_dispatches_chapter_and_no_cache(plugin_main):
     assert calls[-1][:3] == ("123456", None, False)
     assert calls[-1][3] == ChapterQuery("head", 2)
     assert calls[-1][4] == "pdf"
+    assert calls[-1][5] is None
 
     message = asyncio.run(
         plugin._run_command(event, PluginConfig(), "123456 --bad")
@@ -499,6 +559,17 @@ class _FakeSource:
 
     def fetch_album(self, album_id: str) -> AlbumInfo:
         return self.album
+
+    def preview_images(self, pid, images_root, limit):
+        from PIL import Image
+
+        images_root.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for index in range(1, min(limit, 3) + 1):
+            path = images_root / f"{pid}-{index}.png"
+            Image.new("RGB", (20, 30), color=(index, 1, 1)).save(path)
+            paths.append(path)
+        return paths
 
     def download_chapter(self, pid, images_root, pdf_path) -> ChapterArtifact:
         from PIL import Image
@@ -663,6 +734,58 @@ def test_run_job_archive_tar_refuses_password(
     )
     assert "tar" in text and "不支持" in text
     assert uploads == []
+
+
+def test_run_job_preview_sends_images(plugin_main, monkeypatch, tmp_path):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(
+        None, {"preview_images": 10, "cache_albums": 0}
+    )
+    uploads: list[str] = []
+
+    async def fake_upload(event, path, file_name, config):
+        uploads.append(file_name)
+        return {}
+
+    monkeypatch.setattr(plugin, "_upload_with_retries", fake_upload)
+    job_root = tmp_path / "preview-job"
+    job_root.mkdir()
+    event = FakeEvent()
+    text = asyncio.run(
+        plugin._run_job(
+            event,
+            "999",
+            PluginConfig.from_mapping(plugin.raw_config),
+            job_root,
+            preview=0,
+        )
+    )
+    assert "预览完成" in text and "已发送 3 张" in text
+    assert uploads == []
+    image_chains = [chain for chain in event.chains if chain.images]
+    assert len(image_chains) == 3
+
+
+def test_run_job_preview_count_and_scope(plugin_main, monkeypatch, tmp_path):
+    album = _album()
+    monkeypatch.setattr(plugin_main, "JmSource", lambda config: _FakeSource(album))
+    plugin = plugin_main.JmDownloaderPlugin(None, {"cache_albums": 0})
+    event = FakeEvent()
+    job_root = tmp_path / "preview-scope"
+    job_root.mkdir()
+    text = asyncio.run(
+        plugin._run_job(
+            event,
+            "999",
+            PluginConfig(),
+            job_root,
+            selector=ChapterQuery("head", 2),
+            preview=2,
+        )
+    )
+    assert "第 1 章" in text
+    assert "已发送 2 张" in text
 
 
 def test_run_job_chapter_out_of_range(plugin_main, monkeypatch, tmp_path):

@@ -116,13 +116,19 @@ HELP_TEXT = """JM PDF 下载器命令说明
 /jm <漫画ID> --type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz>
     选择发送格式：pdf（默认）为合并后的单个 PDF；
     zip/7z/tar 系列把各章 PDF 打包成压缩包发送。
+    未写 --type 时使用配置中的「默认发送格式」。
+
+/jm <漫画ID> --pre [N]
+    预览模式：取所选范围（整本/单章/一条范围）第一章的前 N 张图片直接发送；
+    N 省略或写 0 时使用配置 preview_images（默认 10）。可与 --type 和章节筛选混用。
 
 规则：
 1. -- 开头的开关可以放在 /jm 后的任意位置，例如 /jm --no-cache 123456。
 2. 章节号与 --head/--tail/--latest/--range 不能同时使用，筛选开关之间也互斥。
 3. --no-cache 可以和任意章节筛选组合，例如 /jm 123456 --head 3 --no-cache。
 4. --type 可以放在任意位置，例如 /jm 123456 --head 3 --type zip。
-5. PDF/压缩包默认使用随机密码加密，上传完成后单独发送密码；固定密码在插件配置中填写。"""
+5. --pre 可与 --type、--head/--tail/--latest/--range 组合，顺序不限；预览模式只发图片，不发 PDF/压缩包。
+6. PDF/压缩包默认使用随机密码加密，上传完成后单独发送密码；固定密码在插件配置中填写。"""
 
 GROUP_BLOCK_MESSAGES = {
     "disabled": "当前配置下 /jm 只在私聊生效。",
@@ -142,7 +148,7 @@ def group_block_message(event: AstrMessageEvent, config: PluginConfig) -> str | 
 USAGE_HINT = (
     "用法：/jm <数字ID> [章节号] "
     "[--head/--tail/--latest/--range ... | --no-cache | "
-    "--type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz>]；"
+    "--type <pdf|zip|7z|tar|tar.gz|tar.bz2|tar.xz> | --pre [N]]；"
     "发送 /jm help 查看完整说明"
 )
 
@@ -277,7 +283,8 @@ def parse_command_arguments(raw: str) -> CommandRequest:
     positionals: list[str] = []
     selector: ChapterQuery | None = None
     no_cache = False
-    file_type = "pdf"
+    file_type: str | None = None
+    preview: int | None = None
     cursor = 0
     while cursor < len(words):
         word = words[cursor]
@@ -306,10 +313,28 @@ def parse_command_arguments(raw: str) -> CommandRequest:
             except ArchiveBuildError as exc:
                 raise ValueError(exc.user_message) from exc
             continue
+        if flag == "--pre" or flag.startswith("--pre="):
+            if "=" in word:
+                raw_value = word.split("=", 1)[1].strip()
+                if not raw_value.isdigit():
+                    raise ValueError("--pre 的张数必须是整数")
+                preview = int(raw_value)
+            else:
+                preview = 0
+                takes_value = False
+                if cursor < len(words) and words[cursor].isdigit():
+                    if positionals or cursor + 1 < len(words):
+                        takes_value = True
+                if takes_value:
+                    preview = int(words[cursor])
+                    cursor += 1
+                if preview < 0 or preview > 50:
+                    raise ValueError("--pre 的张数需在 0-50 之间")
+            continue
         if flag not in _SELECTOR_TOKENS:
             raise ValueError(
                 f"未知参数 {word}；可用开关："
-                "--head/--tail/--latest/--range/--no-cache/--type"
+                "--head/--tail/--latest/--range/--no-cache/--type/--pre"
             )
         if selector is not None:
             raise ValueError("--head/--tail/--latest/--range 只能使用一个")
@@ -329,6 +354,7 @@ def parse_command_arguments(raw: str) -> CommandRequest:
         selector,
         no_cache,
         file_type,
+        preview,
     )
 
 
@@ -554,6 +580,7 @@ class JmDownloaderPlugin(Star):
         album_id = normalize_album_id(request.album_id)
         if not album_id:
             return USAGE_HINT
+        file_type = request.file_type or config.default_file_type
         if event.get_group_id() and not config.allow_group:
             return "当前配置下 /jm 只在私聊生效。"
 
@@ -576,7 +603,8 @@ class JmDownloaderPlugin(Star):
                     request.chapter_no,
                     request.no_cache,
                     request.selector,
-                    request.file_type,
+                    file_type,
+                    request.preview,
                 )
             finally:
                 rmtree(job_root, ignore_errors=True)
@@ -625,6 +653,7 @@ class JmDownloaderPlugin(Star):
         no_cache: bool = False,
         selector: ChapterQuery | None = None,
         file_type: str = "pdf",
+        preview: int | None = None,
     ) -> str:
         """执行一次完整任务：读相册 → 收集章节 → 分模式投递。"""
         try:
@@ -679,6 +708,16 @@ class JmDownloaderPlugin(Star):
                 selector=selector,
                 label=scope.label,
             )
+            if preview is not None:
+                return await self._deliver_preview(
+                    event,
+                    source,
+                    album,
+                    scope,
+                    config,
+                    preview,
+                    job_root,
+                )
             if file_type != "pdf":
                 return await self._deliver_archive(context, file_type)
             if scope.chapters is not None:
@@ -1327,6 +1366,49 @@ class JmDownloaderPlugin(Star):
         if cause is None:  # pragma: no cover - 循环至少执行一次
             raise RuntimeError("上传未执行")
         raise cause
+
+    # ---- 预览 ---------------------------------------------------------
+
+    async def _deliver_preview(
+        self,
+        event: AstrMessageEvent,
+        source: JmSource,
+        album: AlbumInfo,
+        scope: "_Scope",
+        config: PluginConfig,
+        requested: int,
+        job_root: Path,
+    ) -> str:
+        """取所选范围第一章的前 N 张图片直接发送，不生成 PDF/压缩包。"""
+        chapters = scope.chapters if scope.chapters is not None else album.chapters
+        first = chapters[0]
+        count = requested if requested not in (None, 0) else config.preview_images
+        count = max(1, min(50, int(count)))
+        position = chapter_position(album, first.pid)
+        title = _filename_fragment(first.title, 24) or "无标题"
+        await self._say(
+            event,
+            f"JM{album.album_id} 第 {position} 章「{title}」预览："
+            f"正在获取前 {count} 张图片…",
+        )
+        images = await to_thread(
+            source.preview_images,
+            first.pid,
+            job_root / "preview" / first.pid,
+            count,
+        )
+        sent = 0
+        for image in images:
+            try:
+                await event.send(MessageChain().file_image(str(image)))
+            except Exception:  # noqa: BLE001 - 单张图片发送失败就停止
+                self.logger.warning("预览图片发送失败", exc_info=True)
+                break
+            sent += 1
+        return (
+            f"JM{album.album_id} 第 {position} 章「{title}」预览完成："
+            f"已发送 {sent} 张（请求前 {count} 张）。"
+        )
 
     # ---- 压缩包投递 ---------------------------------------------------
 

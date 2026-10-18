@@ -7,7 +7,8 @@ AstrBot 插件：在聊天中发送 `/jm <ID>`，抓取 JM 章节图片，合成
 ## 功能
 
 - **两种内容范围**：整本、指定单章，或按 `--head/--tail/--latest/--range` 选取若干章合并发送。
-- **两种发送格式**：默认合并为 PDF；`--type zip|7z|tar|tar.gz|tar.bz2|tar.xz` 时把各章 PDF 打包成压缩包发送。
+- **两种发送格式**：默认合并为 PDF；`--type zip|7z|tar|tar.gz|tar.bz2|tar.xz` 时把各章 PDF 打包成压缩包发送。未写 `--type` 时使用配置 `default_file_type`。
+- **预览模式**：`--pre [N]` 取所选范围第一章的前 N 张图片直接发送；N 省略或写 0 时使用配置 `preview_images`（默认 10），可与 `--type`、章节筛选混用。
 - **整本优先、失败分卷**：先尝试单文件上传；只有整本上传失败才进入分卷回退，分卷切点只落在章节之间。
 - **按实测体积规划分卷**：卷数、单卷目标与每卷章节数由整本 PDF 大小、各章 PDF 大小、投递方式（URL / base64）共同决定，不需要手填固定值。
 - **PDF 密码**：默认每个 PDF 随机生成 8 位打开密码并在上传后单独告知；也可配置固定密码或关闭加密。加密失败时不会发出未加密文件。
@@ -23,7 +24,7 @@ AstrBot 插件：在聊天中发送 `/jm <ID>`，抓取 JM 章节图片，合成
 - AstrBot `>= 4.27.1, < 5`（已在 4.29.1 验证）
 - aiocqhttp（OneBot v11）适配器；协议端为 LLBot / NapCat 等
 - Python 3.10+
-- 运行依赖：`jmcomic>=2.7.0,<3`、`img2pdf>=0.5.1`、`pypdf[crypto]>=5.0`
+- 运行依赖：`jmcomic>=2.7.0,<3`、`img2pdf>=0.5.1`、`pypdf[crypto]>=5.0`、`py7zr>=0.20`、`pyzipper>=0.3`
 
 ## 安装与重载
 
@@ -46,6 +47,7 @@ AstrBot 插件：在聊天中发送 `/jm <ID>`，抓取 JM 章节图片，合成
 /jm <漫画ID> --range 5 -1    从第 5 章到最新
 /jm <漫画ID> --no-cache      本次跳过缓存
 /jm <漫画ID> --type zip      发送 zip 压缩包（也支持 7z/tar/tar.gz/tar.bz2/tar.xz）
+/jm <漫画ID> --pre 10       预览：取所选范围第一章的前 10 张图片
 /jm help                     查看帮助
 ```
 
@@ -57,16 +59,25 @@ AstrBot 插件：在聊天中发送 `/jm <ID>`，抓取 JM 章节图片，合成
 - 章节号必须是漫画 ID 之后的第二个位置参数（例如 `/jm 123456 3`）。
 - `--head/--tail/--latest/--range` 之间只能选一个，且不能和位置章节号同时使用。
 - `--no-cache` 可以和上述任一章节选择参数组合，顺序不限。
-- `--type <格式>` 选择发送格式，默认 `pdf`；压缩包内为各章 PDF（启用加密时逐章加密），例如 `/jm 123456 --head 3 --type zip`。
+- `--type <格式>` 选择发送格式，未指定时使用配置 `default_file_type`（默认 `pdf`）；例如 `/jm 123456 --head 3 --type zip`。
+- `--pre [N]` 进入预览模式：取所选范围（整本/单章/一条范围）第一章的前 N 张图片发送；N 省略或写 0 时用配置 `preview_images`（默认 10）。
 
 ### 帮助
 
 `/jm help`、`/jm --help`、`/jm -h`、`/jm ?` 或直接发送 `/jm` 都会返回帮助。帮助优先发送图片，失败时发送文字。
 
+### 预览
+
+- `--pre [N]`：预览所选范围的**第一章**的前 N 张图片，直接以图片消息发送，不生成 PDF/压缩包。
+- N 省略、写 `0` 或留空时使用配置 `preview_images`（默认 10，范围 1-50）。
+- 可与 `--type`、`--head/--tail/--latest/--range`、位置章节号任意组合，参数顺序不限；预览模式忽略 `--type`。
+- 示例：`/jm 123456 --pre`、`/jm 123456 --pre 20`、`/jm 123456 --head 3 --pre 5`、`/jm 123456 3 --pre`。
+
 ### 发送格式
 
-- `--type pdf`（默认）：把选中的章节合并成一个 PDF 发送。
+- `--type pdf`：把选中的章节合并成一个 PDF 发送（配置 `default_file_type=pdf` 时为默认）。
 - `--type zip|7z|tar|tar.gz|tar.bz2|tar.xz`：把选中的每一章 PDF 打包成压缩包发送；压缩包内文件名带章节序号，便于定位。
+- 不写 `--type` 时使用配置「基本设置 → 默认发送格式」`default_file_type`；显式 `--type` 优先。
 - **压缩包密码**：启用 PDF 密码时，zip/7z 压缩包本身会使用同一密码加密；tar 系列没有标准的压缩包密码机制，此时会提示改用 zip/7z 或关闭 PDF 加密。
 - 压缩包模式不进入 PDF 的分卷回退：上传失败会直接提示原因；压缩包体积过大时建议缩小章节范围或改用 PDF。
 - 7z 需要 `py7zr`，加密 zip 需要 `pyzipper`（均已写入 `requirements.txt`）。
@@ -114,6 +125,8 @@ AstrBot 与协议端在同一容器时可直接使用文件路径；分容器部
 | --- | --- | --- |
 | 基本设置 | `enabled` | 插件总开关，关闭后不响应 `/jm` |
 | 基本设置 | `allow_group` | 是否允许群聊触发；关闭后仅私聊可用 |
+| 基本设置 | `default_file_type` | 未写 `--type` 时的默认发送格式（pdf/zip/7z/tar/tar.gz/tar.bz2/tar.xz） |
+| 基本设置 | `preview_images` | `--pre` 未指定张数或写 0 时的预览张数（1-50，默认 10） |
 | 基本设置 | `encrypt_pdf` | 是否给 PDF 设置打开密码 |
 | 基本设置 | `pdf_password` | 固定打开密码；留空则每个文件随机生成（明文保存在配置中） |
 | 分卷回退 | `split_auto` | 整本上传失败时是否自动规划分卷 |

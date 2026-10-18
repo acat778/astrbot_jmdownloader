@@ -1,18 +1,18 @@
 name: astrbot_jmdownloader
 display_name: JM 下载器
-short_desc: 通过 /jm 命令抓取 JM 章节、合成 PDF 并作为 QQ 文件发送；支持整本/单章/范围选择、PDF/压缩包发送、失败分卷回退、密码加密与本地缓存。
+short_desc: 通过 /jm 命令抓取 JM 章节、合成 PDF 并作为 QQ 文件发送；支持整本/单章/范围选择、PDF/压缩包发送、图片预览、失败分卷回退、密码加密与本地缓存。
 desc: |
   在 AstrBot 中使用 /jm <数字ID> 即可抓取 JM 漫画章节、生成 PDF，并通过 OneBot 协议端发送为 QQ 群文件或私聊文件。
 
-  默认把整本合并为一个 PDF 后上传；如果整本上传失败，则自动按章节边界分成多卷重试（卷数和切分位置由实际体积计算，无需手动配置）。也支持只处理某一章，或用范围参数挑选若干章合并发送；--type 可选择发送 PDF 或 zip/7z/tar 系列压缩包；--no-cache 可强制重新抓取；/jm help 查看完整命令。
+  默认把整本合并为一个 PDF 后上传；如果整本上传失败，则自动按章节边界分成多卷重试（卷数和切分位置由实际体积计算，无需手动配置）。也支持只处理某一章，或用范围参数挑选若干章合并发送；--type 可选择发送 PDF 或 zip/7z/tar 系列压缩包（未指定时用配置的默认格式）；--pre [N] 可预览所选范围第一章的前 N 张图片；--no-cache 可强制重新抓取；/jm help 查看完整命令。
 
   PDF 默认带有随机打开密码，上传完成后单独发送密码；可以在配置中改为固定密码或关闭加密。已下载的章节 PDF 会缓存，重复处理同一本子时只补缺失章节。
 
   配置项按卡片分组（基本设置 / 群聊名单 / 分卷回退 / 上传设置 / 章节缓存 / 下载与网络）。
 
   运行要求：AstrBot 4.27.1 及以上（低于 5.0）与 OneBot v11(aiocqhttp) 适配器；协议端需连接 AstrBot 的反向 WebSocket（默认 ws://<AstrBot主机>:6199/ws）。AstrBot 与协议端不在同一容器时，需要配置协议端可访问的 AstrBot 地址；未配置时使用 base64 方式发送（单文件上限 256 MiB）。
-help: /jm help 查看全部命令。常用写法：/jm 123456（整本）、/jm 123456 3（第 3 章）、/jm 123456 --head 3、/jm 123456 --type zip（发压缩包）、/jm 123456 --no-cache。PDF/压缩包打开密码会在上传结束后单独发送。
-version: 1.2.0
+help: /jm help 查看全部命令。常用写法：/jm 123456（整本）、/jm 123456 3（第 3 章）、/jm 123456 --head 3、/jm 123456 --type zip（发压缩包）、/jm 123456 --pre 10（预览前 10 张图）、/jm 123456 --no-cache。PDF/压缩包打开密码会在上传结束后单独发送。
+version: 1.3.0
 author: ACAT
 repo: https://github.com/acat-fun/astrbot_jmdownloader
 astrbot_version: ">=4.27.1,<5"

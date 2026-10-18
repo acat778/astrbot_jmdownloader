@@ -10,6 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from .archive import normalize_archive_format
+from .errors import ArchiveBuildError
 from typing import Any, Mapping
 
 DEFAULT_PLUGIN_NAME = "astrbot_jmdownloader"
@@ -67,6 +70,17 @@ def parse_cookies(raw: Any) -> dict[str, str]:
     return jar
 
 
+def parse_default_file_type(raw: Any) -> str:
+    """解析默认发送格式；空值/非法值回退为 pdf。"""
+    text = str(raw or "").strip().lower().lstrip(".")
+    if not text or text == "pdf":
+        return "pdf"
+    try:
+        return normalize_archive_format(text)
+    except ArchiveBuildError:
+        return "pdf"
+
+
 def parse_group_ids(raw: Any) -> frozenset[int]:
     """解析群号名单：支持逗号、中文逗号、分号、空格与换行分隔。"""
     numbers: set[int] = set()
@@ -103,6 +117,8 @@ class PluginConfig:
     split_max_volumes: int = 8
     upload_retries: int = 2
     cache_albums: int = 5
+    preview_images: int = 10
+    default_file_type: str = "pdf"
     cookies: str = ""
     proxy: str = ""
     timeout: int = 20
@@ -129,6 +145,12 @@ class PluginConfig:
             ),
             upload_retries=_as_int(source.get("upload_retries"), 2, 0, 5),
             cache_albums=_as_int(source.get("cache_albums"), 5, 0, 50),
+            preview_images=_as_int(
+                source.get("preview_images"), 10, 1, 50
+            ),
+            default_file_type=parse_default_file_type(
+                source.get("default_file_type")
+            ),
             cookies=str(source.get("cookies") or ""),
             proxy=str(source.get("proxy") or ""),
             timeout=_as_int(source.get("timeout"), 20, 5, 120),

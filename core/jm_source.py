@@ -170,23 +170,20 @@ class JmSource:
 
     # -- 单章下载 + PDF 合成 ---------------------------------------------
 
-    def download_chapter(
-        self,
-        pid: str,
-        images_root: Path,
-        pdf_path: Path,
-    ) -> ChapterArtifact:
-        """下载一章图片并合成 PDF，成功后删除原始图片。"""
-        photo_id = str(pid)
+    def _download_photo_images(
+        self, photo_id: str, images_root: Path
+    ) -> tuple[Path, list[Path]]:
+        """下载一章的全部图片，返回 (图片目录, 按页序排列的图片)。
+
+        jmcomic 2.7.x 的 ``download_photo`` 返回 ``DownloadResult(detail,
+        downloader)``，``save_path`` 与 ``manifest`` 都在返回对象上。
+        """
         images_root.mkdir(parents=True, exist_ok=True)
         option = self._option(images_root)
         try:
             downloaded = jmcomic.download_photo(photo_id, option)
         except Exception as exc:  # noqa: BLE001 - 单章失败不拖垮其它章节
             raise _chapter_error(photo_id, exc) from exc
-
-        # jmcomic 2.7.x 的 download_photo 返回 DownloadResult(detail, downloader)；
-        # save_path 与 manifest 都在返回对象上，而不是相册对象上。
         detail = getattr(downloaded, "detail", downloaded)
         saved_at = getattr(detail, "save_path", None)
         image_dir = Path(saved_at) if saved_at else images_root / photo_id
@@ -195,9 +192,30 @@ class JmSource:
             _manifest_image_paths(downloaded),
         )
         if len(images) == 0:
-            empty_reason = f"章节 {photo_id} 没有下载到图片"
-            raise ChapterDownloadError(empty_reason, photo_id)
+            raise ChapterDownloadError(
+                f"章节 {photo_id} 没有下载到图片", photo_id
+            )
+        return image_dir, images
 
+    def preview_images(
+        self, pid: str, images_root: Path, limit: int
+    ) -> list[Path]:
+        """下载一章图片并返回前 ``limit`` 张，用于预览。"""
+        photo_id = str(pid)
+        _, images = self._download_photo_images(photo_id, images_root)
+        return images[: max(1, int(limit))]
+
+    def download_chapter(
+        self,
+        pid: str,
+        images_root: Path,
+        pdf_path: Path,
+    ) -> ChapterArtifact:
+        """下载一章图片并合成 PDF，成功后删除原始图片。"""
+        photo_id = str(pid)
+        image_dir, images = self._download_photo_images(
+            photo_id, images_root
+        )
         image_bytes = sum(_file_size(image) for image in images)
         try:
             page_count = build_chapter_pdf(images, pdf_path)

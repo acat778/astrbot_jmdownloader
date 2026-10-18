@@ -47,7 +47,10 @@ class CommandRequest:
     chapter_no: int | None = None
     selector: ChapterQuery | None = None
     no_cache: bool = False
-    file_type: str = "pdf"
+    file_type: str | None = None
+    """显式 --type；None 表示使用配置默认格式。"""
+    preview: int | None = None
+    """预览张数：None=非预览；0=使用配置默认值；正整数=指定张数。"""
 
 
 @dataclass(frozen=True)
