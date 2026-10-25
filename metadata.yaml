@@ -14,7 +14,7 @@ desc: |
 help: /jm help 查看全部命令。常用：/jm 123456（整本）、/jm 123456 3（第 3 章）、/jm 123456 --type zip、/jm 123456 --pre 10（前 10 页预览）、/jm 123456 --info（详情图+封面）、/jm 123456 --sub loop 6h（订阅更新）、/jm 123456 --sub off（取消订阅）。插件 WebUI 提供「订阅管理」页。
 version: 1.6.2
 author: ACAT
-repo: https://github.com/acat-fun/astrbot_jmdownloader
+repo: https://github.com/acat778/astrbot_jmdownloader
 astrbot_version: ">=4.27.1,<5"
 support_platforms:
   - aiocqhttp
