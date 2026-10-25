@@ -3,4 +3,4 @@ img2pdf>=0.5.1
 pypdf[crypto]>=5.0
 py7zr>=0.20
 pyzipper>=0.3
-\nPillow>=9\n
+Pillow>=9
